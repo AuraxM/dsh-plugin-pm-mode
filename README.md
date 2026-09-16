@@ -293,9 +293,14 @@ three scripts must run **from the profile root**, because they resolve
 `@deepseek-ai/*` and the composition's bare specifiers through the deployment's
 own resolver.
 
-Host-half changes need a profile reload (edit the patch file with
-`patchReload: live`, or restart). Client-half changes need a page refresh unless
-a bundle watcher is rebuilding.
+Host-half changes need a profile reload: either a valid edit to the profile's
+patch file on a `patchReload: live` profile, or a restart. **Do not trust the
+live half blindly.** On one deployment the watcher was registered but inert —
+the new `/pm-mode` route stayed 404 for 40s while the old route kept answering
+on the same pid — and `watchUserPatches` throws when the Cordis HMR service is
+absent, an error boot swallows. Confirm the new route answers
+(`GET /pm-mode/__health__`) instead of assuming the edit took. Client-half
+changes need a page refresh unless a bundle watcher is rebuilding.
 
 ## Known traps
 

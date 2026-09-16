@@ -36,7 +36,7 @@ node E:/dsh/dsh-plugin-pm-mode/scripts/sync-preset.mjs --write
        - id: pm-mode
          name: dsh-pm-mode
    ```
-   改完是否要重启取决于 profile 的 `patchReload`：`live`（随附的 `web` 模板就是）在校验通过后直接重组运行中的应用；`startup` 则只在启动时读一次，必须重启 `dsh web`。
+   改完是否要重启取决于 profile 的 `patchReload`：`live`（随附的 `web` 模板就是）在校验通过后直接重组运行中的应用；`startup` 则只在启动时读一次，必须重启 `dsh web`。别盲信 live：实测遇到过一次 watcher 已注册却不生效（新路由 404、旧路由在同一 pid 上继续应答），改完务必回探 `/pm-mode/__health__` 确认落地。
 3. preset 放到 `$DSH_HOME\.agent-presets\pm\`（就是本目录这两个文件的副本）。
 4. 校验：`scripts/validate-preset.mjs`（36 项，必须从 profile 根目录跑）。
 
