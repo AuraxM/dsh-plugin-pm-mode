@@ -91,6 +91,34 @@ keeps the snapshot honest.
 | Tool cards | A compact card per `pm_*` call with 在面板中打开. |
 | Command | `/pm-mode status\|boards\|json` |
 
+### The drawer follows the conversation on screen
+
+A board is keyed by **session**, but the drawer is registered in
+`shell.overlay` — a frame-level slot with no session prop — so the only session
+it ever knew was the one whose header button opened it, and that id went into a
+single `localStorage` entry (`dsh-pm-mode/session`) shared by the whole GUI.
+
+That combination produced two confusing states: the drawer left open while the
+reader moved to another conversation kept painting the PREVIOUS session's board,
+and reopening it from a different conversation could land on a board with no
+tasks — answered by a dead-end sentence telling the reader to run
+`pm_task action=create` while the real board was busy one conversation away.
+
+The drawer therefore reads the GUI's own `dsh.sessions.current` selection
+(written by the session controller) and keeps following it:
+
+- **following (default, `🔗 跟随会话`)** — the board on screen is always the one
+  belonging to the conversation being read, re-resolved when the drawer opens
+  and while it stays open across a session switch;
+- **pinned (`📌 已钉住`)** — picking a board by hand (the `全部看板` list, or a
+  sibling-board jump) stops the following so the choice is not yanked away; the
+  badge toggles back;
+- an **empty board** is answered with *where the work actually is*: the other
+  boards on this machine that have tasks, one click away, instead of a dead end;
+- the dispatcher's own conversation is filtered out of the Gantt's 未归属
+  swimlane — the collector legitimately observes it, but drawing the reader's
+  own session as an unbound subagent reads as a forgotten child process.
+
 ## Where the data comes from
 
 Two sources, and the doctrine treats both as load-bearing:
@@ -220,7 +248,14 @@ composed and **cannot be rewritten afterwards**, so "which model does the expert
 run on" was only ever editable by hand-editing `preset/agent.cordis.yml`. The
 route now lives in the plugin's own settings document
 (`$DSH_HOME/pm-mode/settings.json`) and is settable from the panel:
-**项目看板 → 资源 → 专家模型** (provider / model / reasoning effort / maxDepth).
+**项目看板 → 专家 → 专家模型** (provider / model / reasoning effort / maxDepth).
+The same card also sits in the **资源** tab, because that is where
+deployment-level resources are configured — one component, two places, so the
+setting is where either kind of reader looks for it.
+
+> Placement is not cosmetic. This card first shipped only in 资源, and the person
+> who asked for the feature could not find it — a setting nobody can find is a
+> setting that does not exist.
 
 **This plugin names no provider and no model.** An earlier revision pinned
 `kimi-coding/k3/max` — one route on one machine, hard-coded into a plugin meant
