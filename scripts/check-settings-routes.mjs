@@ -21,7 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { BoardStore, resolveExpertModelCatalog } from "dsh-pm-mode/store";
-import { createPanelRouter } from "dsh-pm-mode/routes";
+import { createPanelRouter, EXPERT_MODEL_SAVED_NOTE } from "dsh-pm-mode/routes";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "pmb-routes-"));
 const store = new BoardStore({ root });
@@ -193,7 +193,15 @@ const savedBody = JSON.parse(saved.body);
 check("a valid route is saved", saved.status === 200 && savedBody.ok === true, saved.body);
 check("the saved value is what the route reader returns", current.provider === "vendor-b" && current.maxDepth === 3, JSON.stringify(current));
 check("the file on disk has it", JSON.parse(fs.readFileSync(store.settingsFile(), "utf8")).expertModel.model === "model-z");
-check("the answer says when it takes effect", savedBody.note.includes("新开的会话"), savedBody.note);
+check(
+  "the answer says when it takes effect",
+  // Two assertions, deliberately: identity against the router's own constant (so
+  // a reworded sentence cannot outgrow a copied expectation — which is exactly
+  // how this check sat stale while the suite stayed green), and the promise
+  // itself, which is the part an operator acts on.
+  savedBody.note === EXPERT_MODEL_SAVED_NOTE && savedBody.note.includes("无需重启"),
+  savedBody.note,
+);
 check("boards on disk are still only boards", store.listBoardIds().length === 1, JSON.stringify(store.listBoardIds().map((b) => b.boardId)));
 
 // 6b. an empty effort means "the model's own default", so it is accepted

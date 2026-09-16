@@ -78,8 +78,8 @@ ok("transition recorded", board.tasks.t1.transitions.length === 1);
 const blockedNoReason = await byName.pm_task.execute({ action: "update", id: "t1", status: "blocked" }, execFor(SESSION));
 ok("blocked without a reason is refused", blockedNoReason.includes("❌") && blockedNoReason.includes("blockedReason"), blockedNoReason);
 
-await byName.pm_task.execute({ action: "update", id: "t1", status: "blocked", blockedReason: "等 Unity 令牌" }, execFor(SESSION));
-ok("blocked with a reason sticks", board.tasks.t1.status === "blocked" && board.tasks.t1.blockedReason === "等 Unity 令牌");
+await byName.pm_task.execute({ action: "update", id: "t1", status: "blocked", blockedReason: "等 shared-env 令牌" }, execFor(SESSION));
+ok("blocked with a reason sticks", board.tasks.t1.status === "blocked" && board.tasks.t1.blockedReason === "等 shared-env 令牌");
 
 const phase = await byName.pm_task.execute({ action: "phase", id: "t1", phase: "实现", status: "running", note: "开始改表" }, execFor(SESSION));
 ok("phase starts and is timestamped", board.tasks.t1.phases[1].startedAt > 0, phase);
@@ -154,30 +154,30 @@ const note = await byName.pm_mode.execute({ action: "note", taskId: "t2", text: 
 ok("note is recorded", board.notes.length === 1 && note.includes("令牌交接"), note);
 
 section("exclusive shared resource");
-const first = store.acquireResource(board, { id: "unity", label: "Unity + 私服", sessionId: CHILD_A, taskId: "t2" });
+const first = store.acquireResource(board, { id: "shared-env", label: "共享独占环境", sessionId: CHILD_A, taskId: "t2" });
 ok("first acquirer is granted", first.granted === true);
-const second = store.acquireResource(board, { id: "unity", label: "Unity + 私服", sessionId: CHILD_B, taskId: "t2" });
+const second = store.acquireResource(board, { id: "shared-env", label: "共享独占环境", sessionId: CHILD_B, taskId: "t2" });
 ok("second acquirer is queued, not granted", second.granted === false && second.resource.queue.length === 1);
-ok("resource is still held by the first", board.resources.unity.holder.sessionId === CHILD_A);
+ok("resource is still held by the first", board.resources["shared-env"].holder.sessionId === CHILD_A);
 const resources = await byName.pm_mode.execute({ action: "resources" }, execFor(SESSION));
 ok("resources view names the holder and the wait", resources.includes("持有") && resources.includes("排队"), resources);
-const released = store.releaseResource(board, { id: "unity", sessionId: CHILD_A });
+const released = store.releaseResource(board, { id: "shared-env", sessionId: CHILD_A });
 ok(
   "release atomically promotes the queue head",
-  released.next !== null && released.next.sessionId === CHILD_B && board.resources.unity.holder.sessionId === CHILD_B,
+  released.next !== null && released.next.sessionId === CHILD_B && board.resources["shared-env"].holder.sessionId === CHILD_B,
   JSON.stringify(released.next),
 );
 let wrongRelease = "";
 try {
-  store.releaseResource(board, { id: "unity", sessionId: CHILD_A });
+  store.releaseResource(board, { id: "shared-env", sessionId: CHILD_A });
 } catch (error) {
   wrongRelease = String(error.message);
 }
 ok("releasing somebody else's lease is refused", wrongRelease.includes("令牌不在"), wrongRelease || "(no error thrown)");
-const handoff = store.releaseResource(board, { id: "unity", sessionId: CHILD_B });
-ok("the promoted holder can release in turn", handoff.released.sessionId === CHILD_B && board.resources.unity.holder === null);
-const reAcquired = store.acquireResource(board, { id: "unity", label: "Unity + 私服", sessionId: CHILD_B, taskId: "t2" });
-ok("a freed lease is grantable again", reAcquired.granted === true && board.resources.unity.holder.sessionId === CHILD_B);
+const handoff = store.releaseResource(board, { id: "shared-env", sessionId: CHILD_B });
+ok("the promoted holder can release in turn", handoff.released.sessionId === CHILD_B && board.resources["shared-env"].holder === null);
+const reAcquired = store.acquireResource(board, { id: "shared-env", label: "共享独占环境", sessionId: CHILD_B, taskId: "t2" });
+ok("a freed lease is grantable again", reAcquired.granted === true && board.resources["shared-env"].holder.sessionId === CHILD_B);
 
 section("expert domains: routing a new request to the expert that already has the context");
 // The model this board exists for: one user request = one expert = one task.
@@ -186,50 +186,78 @@ section("expert domains: routing a new request to the expert that already has th
 const domainCreated = await byName.pm_agent.execute(
   {
     action: "domain",
-    id: "npc-move",
-    name: "街区NPC移动与寻路",
-    skills: ["NPC 移动", "寻路", "navmesh", "DS 导航", "起步即停"],
+    id: "move-and-path",
+    name: "移动与寻路",
+    responsibility: "位移与碰撞响应、起步/停步手感、路径跟随；不管动画状态机，也不管资源导入流水线。",
   },
   execFor(SESSION),
 );
-ok("domain is created through the tool", board.domains["npc-move"] !== undefined, domainCreated);
+ok("domain is created through the tool", board.domains["move-and-path"] !== undefined, domainCreated);
+ok("the domain keeps the responsibility prose", board.domains["move-and-path"].responsibility.includes("位移与碰撞响应"), domainCreated);
 await byName.pm_agent.execute(
-  { action: "domain", id: "level-pass", name: "关卡通关与进度", skills: ["关卡", "通关", "卡关"] },
+  { action: "domain", id: "build-cache", name: "构建缓存", responsibility: "增量产物的复用与失效判定；不管发布流水线。" },
   execFor(SESSION),
+);
+// A board written before routing became a model judgement carries `skills`. It
+// must keep reading (folded into the prose) instead of erroring or showing up
+// empty — no migration, no rewrite.
+const legacyDomain = await byName.pm_agent.execute(
+  { action: "domain", id: "legacy-keywords", name: "旧关键词领域", skills: ["旧关键词甲", "旧关键词乙"] },
+  execFor(SESSION),
+);
+ok("a legacy skills array still registers", board.domains["legacy-keywords"] !== undefined, legacyDomain);
+ok(
+  "legacy keywords read back as responsibility prose",
+  board.domains["legacy-keywords"].responsibility === "旧关键词甲 / 旧关键词乙",
+  String(board.domains["legacy-keywords"].responsibility),
 );
 
-const request = "街区里的 NPC 又出现走路滑步：起步后有一段滑动位移";
+const request = "起步后有一段滑动位移，路径跟随也偏了";
 await byName.pm_task.execute(
-  { action: "create", id: "t3", title: "NPC 走路滑步", kind: "bugfix", domainId: "npc-move", requestedBy: request },
+  { action: "create", id: "t3", title: "起步滑步", kind: "bugfix", domainId: "move-and-path", requestedBy: request },
   execFor(SESSION),
 );
-ok("task records the domain", board.tasks.t3.domainId === "npc-move");
+ok("task records the domain", board.tasks.t3.domainId === "move-and-path");
 ok("task records the user's original request", board.tasks.t3.requestedBy === request);
 
-const routed = await byName.pm_agent.execute({ action: "recommend", request }, execFor(SESSION));
-ok("recommend routes to the matching domain", routed.includes("npc-move"), routed);
-ok("recommend says who to dispatch to", routed.includes("下一步"), routed);
-ok("recommend does not confuse a different domain", !routed.split("下一步")[0].includes("level-pass（") || routed.indexOf("npc-move") < routed.indexOf("level-pass"), routed);
+section("dispatch material: judgement, not scoring");
+const material = await byName.pm_agent.execute({ action: "recommend", request }, execFor(SESSION));
+ok("the material lists every domain with its responsibility", material.includes("move-and-path") && material.includes("位移与碰撞响应"), material);
+ok("the material echoes the request as context", material.includes(request), material);
+ok("the material says the dispatcher judges, not the plugin", material.includes("归属由你自己判断"), material);
+ok("the material carries no score, hit list or confidence", !/得分|命中|置信度/.test(material), material);
+ok("the material carries the shared-resource state", material.includes("共享资源令牌"), material);
 
-const routedOther = await byName.pm_agent.execute({ action: "recommend", request: "这一关过不去，卡在第三关" }, execFor(SESSION));
-ok("a different request routes to the other domain", routedOther.includes("level-pass"), routedOther);
+const narrowed = await byName.pm_agent.execute({ action: "recommend", domainId: "build-cache" }, execFor(SESSION));
+ok("domainId narrows the material to that domain", narrowed.includes("build-cache") && !narrowed.includes("move-and-path"), narrowed);
+ok("material without a domain id still needs one of the two inputs", (await byName.pm_agent.execute({ action: "recommend" }, execFor(SESSION))).includes("需要 request"), "");
 
 const expertBind = await byName.pm_agent.execute(
-  { action: "bind", sessionId: CHILD_A, taskId: "t3", label: "NPC 移动专家", role: "expert", domainId: "npc-move" },
+  { action: "bind", sessionId: CHILD_A, taskId: "t3", label: "移动与寻路专家", role: "expert", domainId: "move-and-path" },
   execFor(SESSION),
 );
-ok("an expert bind registers the domain owner", expertBind.includes("expert") && expertBind.includes("npc-move"), expertBind);
-ok("the domain points at its owner", board.domains["npc-move"].ownerSessionId === CHILD_A);
+ok("an expert bind registers the domain owner", expertBind.includes("expert") && expertBind.includes("move-and-path"), expertBind);
+ok("the domain points at its owner", board.domains["move-and-path"].ownerSessionId === CHILD_A);
 
-const routedAfter = await byName.pm_agent.execute({ action: "recommend", request }, execFor(SESSION));
-ok("once owned, follow-ups go back to the same expert", routedAfter.includes(CHILD_A.slice(0, 8)), routedAfter);
-ok("the recommendation says not to open a new agent", routedAfter.includes("不要新开"), routedAfter);
+const materialAfter = await byName.pm_agent.execute({ action: "recommend", request }, execFor(SESSION));
+ok("the material names the existing owner so the follow-up goes back to it", materialAfter.includes(CHILD_A.slice(0, 8)), materialAfter);
+ok("the material says to reuse the owner instead of opening another agent", materialAfter.includes("别另开 Agent"), materialAfter);
+ok("no domain-less expert yet → that section stays out of the material", !materialAfter.includes("还没挂领域的专家"), materialAfter);
+
+// An expert whose domains are all gone still holds context: the material must
+// surface it as a reuse candidate (a keyword matcher could never do this).
+// Bound WITHOUT a task on purpose — `bindAgent` inherits a task's domainId, so a
+// task-bound bind would make this expert the owner of that task's domain.
+await byName.pm_agent.execute({ action: "bind", sessionId: "sess-expert-loaner", label: "待归属专家", role: "expert" }, execFor(SESSION));
+const materialWithLoner = await byName.pm_agent.execute({ action: "recommend", request }, execFor(SESSION));
+ok("an expert with no domain is still offered as a reuse candidate", materialWithLoner.includes("还没挂领域的专家") && materialWithLoner.includes("待归属专家"), materialWithLoner);
+await byName.pm_agent.execute({ action: "unbind", sessionId: "sess-expert-loaner" }, execFor(SESSION));
 
 const roster = await byName.pm_mode.execute({ action: "experts" }, execFor(SESSION));
-ok("the expert roster lists the expert", roster.includes(CHILD_A) && roster.includes("NPC 移动专家"), roster);
+ok("the expert roster lists the expert", roster.includes(CHILD_A) && roster.includes("移动与寻路专家"), roster);
 ok("the roster states the one-request-one-expert discipline", roster.includes("一个用户诉求 = 一个专家"), roster);
 const summaryWithExperts = await byName.pm_mode.execute({ action: "summary" }, execFor(SESSION));
-ok("summary surfaces the experts", summaryWithExperts.includes("专家") && summaryWithExperts.includes("npc-move"), summaryWithExperts);
+ok("summary surfaces the experts", summaryWithExperts.includes("专家") && summaryWithExperts.includes("move-and-path"), summaryWithExperts);
 
 const helperBind = await byName.pm_agent.execute(
   { action: "bind", sessionId: "sess-helper-cccc3333", taskId: "t3", label: "内部取证", role: "helper", parentSessionId: CHILD_A },
@@ -239,27 +267,50 @@ ok("an expert's helper is bound under the same task", helperBind.includes("helpe
 ok("the helper keeps its parent link", board.agents["sess-helper-cccc3333"].parentSessionId === CHILD_A);
 
 section("the dispatcher grants and revokes the shared environment");
-board.resources.unity.holder = null;
-board.resources.unity.queue = [];
+board.resources["shared-env"].holder = null;
+board.resources["shared-env"].queue = [];
 const grantToA = await byName.pm_mode.execute(
-  { action: "grant", id: "unity", sessionId: CHILD_A, taskId: "t3", holderLabel: "NPC 移动专家" },
+  { action: "grant", id: "shared-env", sessionId: CHILD_A, taskId: "t3", holderLabel: "移动与寻路专家" },
   execFor(SESSION),
 );
-ok("grant hands the lease to the named expert", grantToA.includes("已交给") && board.resources.unity.holder.sessionId === CHILD_A, grantToA);
+ok("grant hands the lease to the named expert", grantToA.includes("已交给") && board.resources["shared-env"].holder.sessionId === CHILD_A, grantToA);
 ok("grant tells the dispatcher to say so in the task book", grantToA.includes("必须报告释放"), grantToA);
 
-const grantToB = await byName.pm_mode.execute({ action: "grant", id: "unity", sessionId: CHILD_B }, execFor(SESSION));
+const grantToB = await byName.pm_mode.execute({ action: "grant", id: "shared-env", sessionId: CHILD_B }, execFor(SESSION));
 ok("grant refuses to overwrite a live holder without force", grantToB.includes("❌") && grantToB.includes("force"), grantToB);
 
-const forced = await byName.pm_mode.execute({ action: "grant", id: "unity", sessionId: CHILD_B, force: true }, execFor(SESSION));
-ok("force takes the lease over and records the handoff", forced.includes("原持有者") && board.resources.unity.holder.sessionId === CHILD_B, forced);
+const forced = await byName.pm_mode.execute({ action: "grant", id: "shared-env", sessionId: CHILD_B, force: true }, execFor(SESSION));
+ok("force takes the lease over and records the handoff", forced.includes("原持有者") && board.resources["shared-env"].holder.sessionId === CHILD_B, forced);
 
-const revoked = await byName.pm_mode.execute({ action: "revoke", id: "unity", promote: false }, execFor(SESSION));
-ok("revoke takes the lease back", revoked.includes("已收回") && board.resources.unity.holder === null, revoked);
+const revoked = await byName.pm_mode.execute({ action: "revoke", id: "shared-env", promote: false }, execFor(SESSION));
+ok("revoke takes the lease back", revoked.includes("已收回") && board.resources["shared-env"].holder === null, revoked);
 
 // Leave the lease in a known state for the sections below (the persistence
 // round trip asserts the holder survives a reload).
-store.acquireResource(board, { id: "unity", label: "Unity + 私服", sessionId: CHILD_B, taskId: "t2" });
+store.acquireResource(board, { id: "shared-env", label: "共享独占环境", sessionId: CHILD_B, taskId: "t2" });
+
+/* #region retired-resource-ids */
+section("a board written with the retired resource ids keeps working");
+// Resource ids are caller-chosen and stored verbatim, so an id that came from an
+// older revision (or from another operator's naming) must keep working — no
+// migration, no rename, no error. These literals are DATA on purpose: they are
+// the only place in the repo where a retired id appears, and they exist to prove
+// old boards do not break.
+const legacyIds = ["unity", "private-server"];
+for (const legacyId of legacyIds) {
+  store.defineResource(board, { id: legacyId, label: "老看板里的资源" });
+  const acquired = store.acquireResource(board, { id: legacyId, label: "老看板里的资源", sessionId: CHILD_A, taskId: "t2" });
+  ok("a legacy id is still granted as-is (" + legacyId + ")", acquired.granted === true && board.resources[legacyId].holder.sessionId === CHILD_A, JSON.stringify(acquired.granted));
+  // The dispatcher's own handoff path (`force`): the previous holder already
+  // reported in, so the lease moves in one recorded step.
+  const handed = store.grantResource(board, { id: legacyId, sessionId: CHILD_B, force: true });
+  ok("a legacy id is still transferable (" + legacyId + ")", board.resources[legacyId].holder.sessionId === CHILD_B, JSON.stringify(handed.resource.holder));
+  const released = store.releaseResource(board, { id: legacyId, sessionId: CHILD_B });
+  ok("a legacy id is still releasable (" + legacyId + ")", released.released !== null && board.resources[legacyId].holder === null);
+  ok("the legacy id was NOT rewritten (" + legacyId + ")", board.resources[legacyId].id === legacyId, board.resources[legacyId].id);
+  delete board.resources[legacyId];
+}
+/* #endregion retired-resource-ids */
 
 section("plugin settings: the expert's model is configuration, not a composition value");
 const defaults = store.settings();
@@ -373,7 +424,7 @@ ok("the refusal happened before any child was started", delegated.length === 0, 
 
 const delegate = makeDelegate(route);
 const startResult = await delegate(
-  { description: "NPC 移动", prompt: "修复街区 NPC 起步即停", persona: EXPERT_PERSONA },
+  { description: "移动与寻路", prompt: "起步后有一段滑动位移", persona: EXPERT_PERSONA },
   { agent: { id: "dispatcher-session" }, signal: new AbortController().signal },
 );
 ok("delegation returns a durable continuable child id", startResult.kind === "continuable" && startResult.subagentId === "child-1", JSON.stringify(startResult));
@@ -456,10 +507,10 @@ store.flush(board);
 const reloaded = new BoardStore({ root }).open(SESSION);
 ok("tasks survive a reload", Object.keys(reloaded.tasks).length >= 2);
 ok("agents survive a reload", reloaded.agents[CHILD_A] !== undefined);
-ok("expert domains survive a reload", reloaded.domains["npc-move"] !== undefined && reloaded.domains["npc-move"].ownerSessionId === CHILD_A);
-ok("a task's domain and request survive a reload", reloaded.tasks.t3.domainId === "npc-move" && reloaded.tasks.t3.requestedBy === request);
+ok("expert domains survive a reload", reloaded.domains["move-and-path"] !== undefined && reloaded.domains["move-and-path"].ownerSessionId === CHILD_A);
+ok("a task's domain and request survive a reload", reloaded.tasks.t3.domainId === "move-and-path" && reloaded.tasks.t3.requestedBy === request);
 ok("timeline survives a reload", reloaded.timeline.length >= 4);
-ok("resource holder survives a reload", reloaded.resources.unity.holder.sessionId === CHILD_B);
+ok("resource holder survives a reload", reloaded.resources["shared-env"].holder.sessionId === CHILD_B);
 ok("notes survive a reload", reloaded.notes.length === 1);
 
 section("board isolation");

@@ -7,7 +7,7 @@ An agent on the `pm` preset is a **总控 (dispatcher)**: every user request goe
 to **exactly one domain expert**, that expert owns the whole request (its
 internal breakdown is the expert's own business), follow-up requests in the
 same domain route back to the same expert, and the dispatcher alone hands out
-the exclusive Unity + private-server lease. All of it is written to a board the
+the exclusive `shared-env` lease. All of it is written to a board the
 Web GUI renders as a **24-hour Gantt chart** plus an **expert/domain roster**.
 The dispatcher does none of the work itself and stays free to answer the user
 at any moment.
@@ -29,7 +29,7 @@ Three tiers, and each tier exists for one reason:
 Why this replaced the older "decompose into lines" doctrine: an earlier revision
 of this preset told the session to split a request into task lines and dispatch
 each one. A measured run (`session-7564825d`, 2026-09-15) turned **one**
-npc-movement bug into 4 lines and 6 child agents — root cause, observation prep,
+movement bug into 4 lines and 6 child agents — root cause, observation prep,
 environment bring-up, live baseline, then a repair line and a regression line —
 while the dispatcher spent its own turns polling environment truth and relaying
 notes between lines. The user's ask had been "give it to someone who knows this
@@ -40,12 +40,13 @@ The three rules that came out of it, and where they are enforced:
 1. **One request = one task = one expert.** Doctrine, plus `pm_task` writing the
    user's own words into `requestedBy`, plus a task model with `domainId`.
 2. **A follow-up in the same domain goes back to the same expert.** Enforced by
-   `pm_agent action=recommend` (a transparent scorer over declared domains) and
-   by `pm_agent action=domain` / `bind role=expert` making the routing table
-   durable instead of a matter of the dispatcher's memory.
+   `pm_agent action=recommend` (material only — responsibilities, owners, work in
+   flight; no keyword matching and no score) plus `pm_agent action=domain` /
+   `bind role=expert`, which make the ownership table durable instead of a matter
+   of the dispatcher's memory.
 3. **The environment has one issuer.** `pm_mode action=grant` / `action=revoke`
-   are the dispatcher's, and the expert persona refuses to touch Unity or the
-   private server without a lease.
+   are the dispatcher's, and the expert persona refuses to touch a shared
+   environment without a lease.
 
 ## Why it is two halves
 
@@ -235,10 +236,13 @@ The three board actions that carry the model:
   registers the expert that owns the area. Without it the domain has no owner
   and the next request in the area opens a fresh agent instead of reusing the
   context.
-- `pm_mode action=grant id=unity sessionId=<expert> taskId=<task>` is the only
+- `pm_mode action=grant id=shared-env sessionId=<expert> taskId=<task>` is the only
   way a worker gets the environment. `action=revoke` takes it back (promoting
   the queue head unless `promote: false`), and `force: true` on a grant hands it
   over in one recorded step when the previous holder has already stopped.
+  The resource id is caller-chosen and stored verbatim — declare yours with
+  `action=define-resource`, and note that ids already on a board keep working
+  as-is (no migration, no error).
 
 ## The expert model is a plugin setting (and the plugin ships no model)
 
@@ -319,12 +323,14 @@ to be generic. `DEFAULT_EXPERT_MODEL` is now empty on purpose, and:
 ## Development
 
 ```powershell
-node scripts/smoke.mjs                 # 109 checks: store, domains, routing, leases, grants, settings, delegation, metrics, persistence
-node scripts/check-tools.mjs           # 47 checks: compiled schemas against a real ToolRuntime, expert tool included
+node scripts/smoke.mjs                 # 125 checks: store, domains, dispatch material, leases, legacy ids, settings, delegation, metrics, persistence
+node scripts/check-tools.mjs           # 49 checks: compiled schemas against a real ToolRuntime, expert tool included
+node scripts/check-client.mjs          # 38 checks: the inlined bundle stays in sync with its modules, token-only colours, the model picker
+node scripts/check-terms.mjs           # vocabulary: no project-specific term outside the two documented allowances
 cd $HOME\.dsh\profiles
 node E:/dsh/dsh-plugin-pm-mode/scripts/check-settings-routes.mjs  # 23 checks: the panel's settings routes over a fake llm
-node E:/dsh/dsh-plugin-pm-mode/scripts/validate-preset.mjs   # 53 checks: the preset composition, its depth tiers, its doctrine
-node E:/dsh/dsh-plugin-pm-mode/scripts/sync-preset.mjs       # snapshot vs live preset
+node E:/dsh/dsh-plugin-pm-mode/scripts/validate-preset.mjs   # 57 checks: the preset composition, its depth tiers, its doctrine
+node E:/dsh/dsh-plugin-pm-mode/scripts/sync-preset.mjs       # snapshot vs live preset (`--mirror` publishes a repo-side change)
 ```
 
 `lib/store.js`, `lib/collector.js`, `lib/routes.js`, `lib/tools.js` and
@@ -382,7 +388,7 @@ session was re-woken at ~10-second intervals; turns 2–5 burned 561–1325 inpu
 tokens each doing nothing but re-reading the board and announcing there was
 nothing to advance, and it eventually invented busywork (writing a token-
 arbitration note) to satisfy "make progress". The one valuable round —
-discovering that the Unity + private-server environment had been running with no
+discovering that a shared environment had been running with no
 lease holder — happened only **after the user cleared the goal by hand**.
 
 The `pm` preset therefore disables both goal rows (`tool-goal`,

@@ -287,6 +287,13 @@ for (const [label, needle] of [
   ok(label, doctrine.includes(needle), needle);
 }
 ok("the old 'decompose into lines' model is gone", !doctrine.includes("PM 模式"), "still mentions「PM 模式」");
+// Routing is the model's judgement now: the persona must SAY so, and must not
+// advertise the retired keyword matcher back into the doctrine.
+ok(
+  "the persona hands routing to the dispatcher's own judgement",
+  doctrine.includes("归属由你自己判断") && !doctrine.includes("路由关键词") && !doctrine.includes("关键词写全一点"),
+  "mentions「路由关键词」/「关键词写全一点」",
+);
 
 for (const id of ["tool-subagent", "tool-subagent-fork"]) {
   const row = named.find((entry) => entry.row.id === id);

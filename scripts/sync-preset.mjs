@@ -10,7 +10,15 @@
  * Usage (from anywhere):
  *   node scripts/sync-preset.mjs            check; non-zero exit when behind, prints diff
  *   node scripts/sync-preset.mjs --write    refresh the snapshot from the live copy
+ *   node scripts/sync-preset.mjs --mirror   publish the snapshot TO the live copy
  *   node scripts/sync-preset.mjs --diff     always print the full diff
+ *
+ * `--write` is the normal direction (the live preset is where a session's
+ * operator edits it). `--mirror` exists for the other case: a change that
+ * originates in the repo (a doctrine rewrite) has to reach the directory the
+ * roster actually reads, and it should be one documented command instead of a
+ * hand copy. A mirrored preset is picked up by the NEXT session — presets mount
+ * per session, so no restart and no running session is disturbed.
  *
  * `PM_PRESET_DIR` overrides the live directory (useful for a disabled preset
  * such as `.agent-presets/pm.disabled`, or for a test fixture).
@@ -27,6 +35,7 @@ const LIVE_DIR =
 
 const FILES = ["preset.yml", "agent.cordis.yml"];
 const write = process.argv.includes("--write");
+const mirror = process.argv.includes("--mirror");
 const alwaysDiff = process.argv.includes("--diff");
 
 console.log("snapshot : " + SNAPSHOT_DIR);
@@ -79,6 +88,22 @@ if (missing > 0) {
   process.exit(2);
 }
 
+if (mirror) {
+  let changed = 0;
+  for (const report of reports) {
+    if (report.same) continue;
+    fs.writeFileSync(report.livePath, report.snapshotText, "utf8");
+    console.log("published snapshot → live: " + report.livePath);
+    changed += 1;
+  }
+  console.log(
+    changed === 0
+      ? "\nalready in sync (live copy unchanged)"
+      : "\n" + changed + " file(s) published — the NEXT session on this preset picks them up (presets mount per session; no restart)",
+  );
+  process.exit(0);
+}
+
 if (write) {
   let changed = 0;
   for (const report of reports) {
@@ -97,13 +122,16 @@ if (behind === 0) {
   process.exit(0);
 }
 
-console.log("\nSNAPSHOT IS BEHIND on " + behind + " file(s):");
+console.log("\nSNAPSHOT AND LIVE COPY DIFFER on " + behind + " file(s):");
 for (const report of reports) {
   if (report.same) continue;
   console.log("\n" + report.name + ":");
   for (const line of lineDiff(report.name, report.liveText, report.snapshotText)) console.log(line);
 }
 if (!alwaysDiff) {
-  console.log("\n(run with --write to refresh the snapshot, then commit)");
+  // Which way to resolve the drift depends on WHICH side changed — printing only
+  // `--write` invites someone to overwrite a repo-side rewrite with the live copy.
+  console.log("\n(live copy changed → `--write` refreshes the snapshot from it;");
+  console.log(" this repo changed → `--mirror` publishes the snapshot to the live copy)");
 }
 process.exit(1);

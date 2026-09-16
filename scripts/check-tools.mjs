@@ -197,10 +197,23 @@ for (const field of ["domainId", "requestedBy"]) {
   );
 }
 ok(
-  "pm_agent carries role + domainId + parentSessionId (expert registration)",
+  "pm_agent carries role + domainId + parentSessionId + responsibility (expert registration and judged routing)",
   agentSchema !== undefined &&
-    ["role", "domainId", "parentSessionId", "skills", "request"].every((field) => agentSchema.parameters.properties[field] !== undefined),
+    ["role", "domainId", "parentSessionId", "responsibility", "request"].every((field) => agentSchema.parameters.properties[field] !== undefined),
   agentSchema === undefined ? "pm_agent missing" : Object.keys(agentSchema.parameters.properties).join(","),
+);
+ok(
+  "the retired skills array is still accepted (old calls must not break)",
+  agentSchema !== undefined && agentSchema.parameters.properties.skills !== undefined,
+  agentSchema === undefined ? "pm_agent missing" : Object.keys(agentSchema.parameters.properties).join(","),
+);
+ok(
+  "recommend is described as material, not as a matcher",
+  agentSchema !== undefined &&
+    agentSchema.description.includes("不返回关键词命中") &&
+    agentSchema.description.includes("归属由你自己判断") &&
+    !agentSchema.description.includes("路由到领域与专家"),
+  agentSchema === undefined ? "pm_agent missing" : agentSchema.description.slice(0, 160),
 );
 
 // The expert tool moved OUT of the composition and INTO the plugin, which is
