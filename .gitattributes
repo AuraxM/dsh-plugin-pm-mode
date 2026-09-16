@@ -1,0 +1,12 @@
+# Keep line endings stable: these files are UTF-8 with LF in the working tree,
+# and the deployment's own sources use LF. Without this, Git's autocrlf
+# rewrites the whole tree to CRLF on a Windows checkout and every later diff
+# looks like a rewrite.
+* text=auto eol=lf
+
+# Binary safety net for anything that lands here later.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.zstd binary

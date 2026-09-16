@@ -1,0 +1,38 @@
+{
+  "name": "dsh-pm-mode",
+  "description": "PM Mode for the DeepSeek Harness: an agent preset that manages subagent sessions as a project — a per-session board of tasks, phases, exclusive shared-resource leases, and a runtime-sampled execution timeline shown as a 24-hour Gantt chart in the Web GUI",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./preset": "./lib/preset.js",
+    "./client": "./lib/client.js",
+    "./store": "./lib/store.js",
+    "./routes": "./lib/routes.js",
+    "./expert": "./lib/expert.js",
+    "./expert-tool": "./lib/expert-tool.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "files": [
+    "lib",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "project-management",
+    "subagent",
+    "gantt"
+  ],
+  "license": "MIT"
+}
