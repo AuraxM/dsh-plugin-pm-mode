@@ -247,15 +247,19 @@ deliberate: a composition row's `agentOptions` is resolved when a session is
 composed and **cannot be rewritten afterwards**, so "which model does the expert
 run on" was only ever editable by hand-editing `preset/agent.cordis.yml`. The
 route now lives in the plugin's own settings document
-(`$DSH_HOME/pm-mode/settings.json`) and is settable from the panel:
-**项目看板 → 专家 → 专家模型** (provider / model / reasoning effort / maxDepth).
-The same card also sits in the **资源** tab, because that is where
-deployment-level resources are configured — one component, two places, so the
-setting is where either kind of reader looks for it.
+(`$DSH_HOME/pm-mode/settings.json`) and is set in **DSH 设置 → 专家模型**
+(provider / model / reasoning effort / maxDepth). The board panel's **专家** tab
+carries the same form — one component, both surfaces — so the setting is also
+where someone already reading the board reaches for it, and the **资源** tab
+keeps it beside the leases.
 
-> Placement is not cosmetic. This card first shipped only in 资源, and the person
-> who asked for the feature could not find it — a setting nobody can find is a
-> setting that does not exist.
+> Placement is not cosmetic, and this setting has now moved twice for the same
+> reason. It first shipped only in 资源, and the person who asked for the feature
+> could not find it. It moved to 专家, and the case that broke was different: the
+> board panel is only reachable from a session header, so a **fresh session had
+> no way to configure the route before its first dispatch** — the one moment the
+> setting is actually needed. A deployment-level value belongs in DSH Settings;
+> the panel keeps the in-context copy.
 
 **This plugin names no provider and no model.** An earlier revision pinned
 `kimi-coding/k3/max` — one route on one machine, hard-coded into a plugin meant
@@ -282,10 +286,12 @@ to be generic. `DEFAULT_EXPERT_MODEL` is now empty on purpose, and:
   is on screen, instead of failing in a session that starts ten minutes later.
   Clearing the route (`provider`/`model` empty) is a legitimate request and skips
   adapter resolution entirely — there is no model to ask about.
-- **When it applies**: the route is read when the expert tool is registered by
-  the preset — i.e. it takes effect for **newly opened sessions**. A session
-  already running keeps the model it started with. The panel says so where the
-  setting lives.
+- **When it applies**: per DELEGATION. The tool description is written at session
+  composition (so the dispatcher reads the route that session will use), but the
+  value itself is read through `pmMode.expertModel()` on every `subagent_expert`
+  call — so a save applies to the next expert started anywhere, with no restart
+  and no new session. An expert already running keeps the model it started with.
+  The save's confirmation says exactly this.
 
 ## HTTP surface
 

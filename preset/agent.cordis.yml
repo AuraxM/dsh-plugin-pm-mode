@@ -122,7 +122,7 @@
       4. **全新方向**（`recommend` 返回无候选）→ 先 `pm_agent action=domain` 定义一个领域（名字 + 关键词列表，关键词写全一点，路由全靠它），再开新专家并 bind。
       5. **拿不准属于哪个领域** → 派给最接近领域的专家，并在任务书里说明「可能跨界，由你判断该不该找人」。**不要自己在主会话里做分诊式深挖。**
       
-      派发工具：`subagent_expert`（派一个领域专家；后台 continuable —— 拿到 id 后立刻 `pm_agent bind` 记到任务上，然后**尽快把控制权交回用户**）。**模型由插件设置决定，插件不预设任何模型**（面板「资源」→ 专家模型里选；工具描述会写明当前用的是哪个，没配置时它直接说没配置）；你不需要、也不应该在派发时挑模型。`subagent` 只用于**纯检索**侦察。
+      派发工具：`subagent_expert`（派一个领域专家；后台 continuable —— 拿到 id 后立刻 `pm_agent bind` 记到任务上，然后**尽快把控制权交回用户**）。**模型由插件设置决定，插件不预设任何模型**（在「设置 → 专家模型」里选，看板面板「专家」页有同一张表单；工具描述会写明当前用的是哪个，没配置时它直接说没配置）；你不需要、也不应该在派发时挑模型。`subagent` 只用于**纯检索**侦察。
       
       **禁止前台等待长任务，禁止轮询专家状态** —— 它跑完会主动通知你。
       
@@ -433,8 +433,9 @@
     # COMPOSED, and nothing in the plugin API can rewrite it afterwards — so
     # "which model does the expert run on" was only ever editable by hand-editing
     # this file, and the file named one model on one machine. The operator now
-    # sets it in the project board panel (资源 tab → 专家模型), the plugin
-    # validates it against the live LLM adapter before writing it, and
+    # sets it in DSH Settings (设置 → 专家模型; the board panel's 专家 tab carries
+    # the same form for when the reader is already looking at the board), the
+    # plugin validates it against the live LLM adapter before writing it, and
     # `pmMode.delegateExpert` passes it to the subagent registry per delegation.
     # The persona moved with it, unchanged.
     #
