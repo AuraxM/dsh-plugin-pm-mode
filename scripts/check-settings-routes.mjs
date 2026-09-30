@@ -149,6 +149,17 @@ check(
   JSON.stringify(stateBody.settings),
 );
 check("state still carries the board", stateBody.tasks.length === 0 && stateBody.domains.length === 0);
+// The project fields are ALWAYS emitted, empty or not. A board whose project is
+// unknown and a board from a build that never had the field are different
+// states, and both the panel and the reload probe read this payload to tell them
+// apart — a field emitted only when non-empty cannot.
+check(
+  "the state payload always carries projectKey / projectRoot (empty when unidentified)",
+  Object.prototype.hasOwnProperty.call(stateBody, "projectKey") &&
+    Object.prototype.hasOwnProperty.call(stateBody, "projectRoot") &&
+    stateBody.projectKey === "",
+  JSON.stringify({ projectKey: stateBody.projectKey, projectRoot: stateBody.projectRoot }),
+);
 
 // 3. rejecting a route the adapter cannot resolve
 const bogus = await call("POST", "/__api__/manage", {
@@ -241,7 +252,88 @@ const bareResult = await new Promise((resolve) => {
 });
 check("no settings surface → 501, not an empty picker", bareResult.status === 501, bareResult.body);
 
+// 9. the experience-memory routes — the panel's 经验 tab
+//
+// The project fixture is a MARKED directory under the real home, not the temp
+// board root. Two facts make that necessary rather than fussy: the identity rule
+// walks up for a marker but never claims a home directory or whatever `DSH_HOME`
+// points at, and `mkdtemp` sits outside home entirely — so the board root is
+// correctly UNidentifiable, and a fixture built there would prove nothing. The
+// fixture is removed at the end of this file.
+const PROJECT = fs.mkdtempSync(path.join(os.homedir(), ".pmb-mem-fixture-"));
+fs.mkdirSync(path.join(PROJECT, ".git"), { recursive: true });
+
+const emptyMemory = await call("GET", "/__api__/memory?sessionId=" + SESSION);
+const emptyBody = JSON.parse(emptyMemory.body);
+check("GET /__api__/memory answers 200 without a project on the board", emptyMemory.status === 200, emptyMemory.status);
+check(
+  "a board with no recorded project says so instead of showing an empty list",
+  emptyBody.project === null && Array.isArray(emptyBody.projects),
+  JSON.stringify({ project: emptyBody.project, projects: emptyBody.projects.length }),
+);
+check("it still publishes the kind vocabulary for the form", Array.isArray(emptyBody.kinds) && emptyBody.kinds.includes("gotcha"), JSON.stringify(emptyBody.kinds));
+
+const written = await call("POST", "/__api__/manage", {
+  action: "memory-remember",
+  project: PROJECT,
+  title: "临时看板根不是项目，除非有标记",
+  text: "项目身份靠标记（.git/package.json/…）向上找，找不到就不归属。",
+  kind: "gotcha",
+  tags: ["identity"],
+  evidence: "本测试就是这么把它变成项目的",
+});
+check("a panel memory write is accepted", written.status === 200, written.body);
+
+const withEntry = await call("GET", "/__api__/memory?project=" + encodeURIComponent(PROJECT));
+const entryBody = JSON.parse(withEntry.body);
+check("the entry reads back by explicit project", entryBody.total === 1 && entryBody.matches.length === 1, JSON.stringify({ total: entryBody.total }));
+check(
+  "the entry kept every field the panel renders",
+  entryBody.matches[0].entry.kind === "gotcha" &&
+    entryBody.matches[0].entry.evidence !== "" &&
+    entryBody.matches[0].entry.tags[0] === "identity",
+  JSON.stringify(entryBody.matches[0].entry),
+);
+check("the project is described by its root, so the reader knows where it is", entryBody.project.root === PROJECT, entryBody.project.root);
+check(
+  "the entry landed under the memory directory, not beside the boards",
+  fs.existsSync(path.join(root, "memory")) && store.listBoardIds().length === 1,
+  "memory must not be mistaken for a board",
+);
+
+// A reader filtering by hand: the server-side query still answers (the panel
+// filters locally over everything it already holds).
+const filtered = await call("GET", "/__api__/memory?project=" + encodeURIComponent(PROJECT) + "&q=标记");
+check("the server-side query filters", JSON.parse(filtered.body).matches.length === 1, filtered.body.slice(0, 120));
+const missed = await call("GET", "/__api__/memory?project=" + encodeURIComponent(PROJECT) + "&q=zzzzz");
+check("a query with no match returns no match, not everything", JSON.parse(missed.body).matches.length === 0, missed.body.slice(0, 120));
+
+// A LAN reader may read the memory but never rewrite it.
+const lanMemoryRead = await call("GET", "/__api__/memory?project=" + encodeURIComponent(PROJECT), undefined, "192.168.1.20");
+check("a LAN reader can read the memory", lanMemoryRead.status === 200, lanMemoryRead.status);
+const lanMemoryWrite = await call(
+  "POST",
+  "/__api__/manage",
+  { action: "memory-remember", project: PROJECT, title: "x", text: "y" },
+  "192.168.1.20",
+);
+check("a LAN reader cannot write the memory", lanMemoryWrite.status === 403, lanMemoryWrite.status);
+
+const removed = await call("POST", "/__api__/manage", {
+  action: "memory-forget",
+  project: PROJECT,
+  id: JSON.parse(withEntry.body).matches[0].entry.id,
+});
+check("a panel delete is accepted", removed.status === 200, removed.body);
+check("the delete persisted", JSON.parse((await call("GET", "/__api__/memory?project=" + encodeURIComponent(PROJECT))).body).total === 0);
+
+const noProject = await call("POST", "/__api__/manage", { action: "memory-remember", title: "x", text: "y" });
+check("a write with no project is refused with a reason, not stored nowhere", noProject.status === 400, noProject.body);
+const badId = await call("POST", "/__api__/manage", { action: "memory-forget", project: PROJECT, id: "m-nope" });
+check("deleting an unknown id is refused with the way out", badId.status === 400 && badId.body.includes("list"), badId.body);
+
 const failed = results.filter((item) => !item.pass);
 console.log("\n" + (results.length - failed.length) + "/" + results.length + " route checks passed");
 fs.rmSync(root, { recursive: true, force: true });
+fs.rmSync(PROJECT, { recursive: true, force: true });
 if (failed.length > 0) process.exitCode = 1;

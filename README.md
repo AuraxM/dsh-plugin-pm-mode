@@ -88,9 +88,85 @@ keeps the snapshot honest.
 | Experts tab | One card per **domain**: its name and id, its owning expert (or a loud 无人负责), the expert's live status and delivered count, the routing keywords, and which tasks it has handled — plus the environment leases and who holds them. This is the tab that answers "who already has the context for this?" |
 | Tasks tab | Kanban cards grouped by 进行中 / 需要关注 / 未开始 / 已结束, each carrying its domain chip, the user's original request, its parent line when it is an expert's internal split, phase chips with their own durations, bound agents with live status, the transition log, and 加备注 / 移除. |
 | Resources tab | Exclusive leases: holder + hold time + wait queue, with 强制释放 and 转交队首 for the paths that need a human. |
+| 经验 tab | The project's **cross-session experience memory**: every entry with its kind, tags, evidence and hit count, a filter over them, and 改正 / 删除 on each card. The agent writes them with `pm_memory`; this is where a human reads them and removes a mis-remembered one. |
 | Metrics tab | Task counts, average duration, per-24-hour tool-call histogram, phase cost rollup, task-type rollup, and the most expensive tools. |
 | Tool cards | A compact card per `pm_*` call with 在面板中打开. |
 | Command | `/pm-mode status\|boards\|json` |
+
+### The experience memory outlives the session that wrote it
+
+A board is keyed by **session**, which is correct for work in flight and useless
+for knowledge. A new session opens a new board, so every lesson the previous one
+learned — the token that is valid only here, the ordering a subsystem requires,
+the command that reports success while doing nothing — was gone with it, and the
+next dispatcher re-derived it at full price.
+
+`lib/memory.js` is the other half: entries keyed by **project**, so any PM session
+in the same checkout reads and writes the same file. Three decisions carry it.
+
+**The write gate is the feature.** The failure mode of a memory store is not that
+it is empty — it is that it fills with things the model already knew, after which
+nobody reads it. So the tool description, the preset doctrine and the panel all
+state the same test: *delete it — would the next agent get this wrong?* If not, it
+does not go in. What does: a credential valid only here, a domain's handling
+pattern (the required order, the step everyone skips, the format something
+downstream string-matches), a measured fact that contradicts the obvious reading,
+or an already-proven conclusion with its evidence. Nothing about how a repo is
+laid out or how a common tool is used, because a competent agent arrives at those
+unaided.
+
+**Only the dispatcher reads it, and nothing is injected.** No expert tool consults
+the store, and no `pm_memory` entry is copied into a task book automatically. The
+dispatcher recalls what it wants and decides whether a briefing should carry it.
+A subagent that never sees the store cannot be misled by a stale entry, and the
+store keeps exactly one reader whose queries are visible in the session log.
+
+**A wrong entry must be cheap to remove.** A memory that outlives its session also
+outlives its truth. So `forget` exists, the panel puts 删除 on every card, and an
+entry with no `evidence` is flagged in place — an entry nobody can re-check is an
+entry the next session has to take on faith.
+
+**Which project, and why the rule is "outermost marker".** A session's identity is
+its working directory, resolved upward to the **topmost** directory holding a
+marker. Nearest-marker would fragment a monorepo: the root, each package, and
+every nested `.git` would get its own memory, so a lesson learned in a root
+session would be invisible one directory down. Outermost keeps the whole checkout
+as one project, which is the granularity a dispatcher actually reasons at, and it
+degrades safely — a session started deep inside a subtree still finds its
+repository. `~` is never a project, and neither is whatever `DSH_HOME` points at.
+
+The marker vocabulary has to cover the version control an agent actually meets,
+and it shipped once WITHOUT the one this deployment uses. The checkout at
+`E:\workflow\Project-Atom-Game-xiangliming-trunk` is a **Perforce** workspace —
+`p4config.txt` + `.p4env` + `.p4ignore`, no `.git`, no `package.json`, no language
+manifest anywhere — so it resolved to nothing and `pm_memory` refused every write
+in the directory the dispatcher was working in. A memory tool that cannot file
+anything in the main working directory is worse than no memory tool: it is a
+feature that reports failure forever. The list now covers P4 alongside
+git/hg/svn/jj, the language and build manifests, editor workspaces (`*.sln`,
+`*.code-workspace`, `.vscode/`), and the weakest signals (`*.uproject`,
+`.gitignore`, `.envrc`). A marker whose mere existence proves nothing —
+`package.json`, `p4config.txt`, the pnpm files — must actually carry content.
+
+Two rules keep that generous list from becoming a liability:
+
+- **A project the walk cannot recognize can still be NAMED.**
+  `resolveNamedProject` answers a different question than
+  `resolveProjectIdentity`: "which project did I name" (obey) versus "where am I"
+  (guess). A caller passing `project=<绝对路径>` has identified the project itself,
+  so a directory with no marker of ours is filed under exactly that path instead
+  of being refused. Naming a *subdirectory* of a known project still lands on the
+  project, and naming a home directory is still refused. Guessing stays
+  conservative — an unidentified cwd gets **no** memory rather than one shared
+  bucket — because guessing wrong files a session's lessons under somebody else's
+  project.
+- **`.dsh/project.json` with a `name` overrides everything**, which is how a
+  project the marker list will never know declares itself.
+
+The files are plain JSON under `$DSH_HOME/pm-mode/memory/` — `index.json` for the
+registry, one document per project — written atomically and read on every call, so
+a human can open, edit, or delete one in an editor and the panel stays a thin
+layer over the same bytes rather than a second source of truth.
 
 ### The drawer follows the conversation on screen
 
@@ -122,7 +198,7 @@ The drawer therefore reads the GUI's own `dsh.sessions.current` selection
 
 ## Where the data comes from
 
-Two sources, and the doctrine treats both as load-bearing:
+Three sources, and the doctrine treats all of them as load-bearing:
 
 - **Recorded by the runtime collector** (`lib/collector.js`, host plane):
   `subagent/start|end`, `agent/status`, and `session/event` `tool/call` +
@@ -135,40 +211,68 @@ Two sources, and the doctrine treats both as load-bearing:
   phases, agent bindings, leases, evidence. None of this is inferable, so the
   `pm` preset's doctrine makes "update the board" part of the job rather than
   bookkeeping.
+- **Written by the dispatcher into the project's experience memory**
+  (`lib/memory.js`, `pm_memory`): the lessons that must outlive the session that
+  learned them. Recorded by hand rather than inferred, for the same reason as the
+  board — and gated on being non-obvious, because a memory full of the obvious is
+  a memory nobody reads.
 
-Routing is the one derived read model: `pm_agent action=recommend` scores an
-incoming request against the declared domains (two-character CJK overlaps and
-Latin words count 3, single shared characters count 1) and returns ranked
-candidates, each with the tokens that matched, the owning expert, what that
-expert currently holds, and a next-action line. It is a **scorer, not a
-classifier**: the dispatcher still makes the decision and records it.
+Routing is the one derived read model, and it deliberately does not decide:
+`pm_agent action=recommend` returns **material** — every domain with its prose
+responsibility, its owner and that owner's work in flight, the experts that own no
+domain yet, the registered subagents the board has not bound to a task, and the
+resource leases. The dispatcher reads it and makes the call.
+
+That is a correction, not an omission. An earlier revision scored the incoming
+request against a `skills` keyword array (two-character CJK overlaps and Latin
+words worth 3, single shared characters worth 1) and printed the matched tokens
+and a confidence next to ranked candidates. The score was a lexical accident
+standing where a judgement belongs, and it pushed whoever maintained a domain into
+writing keyword soup so the matcher would fire. The plugin now reports what it
+knows and lets the model reason; `scripts/check-tools.mjs` asserts that the
+description promises material rather than a matcher.
 
 ## Installation
 
 ### 1. The package
 
-```powershell
-git clone https://github.com/AuraxM/dsh-plugin-pm-mode.git E:\dsh\dsh-plugin-pm-mode
-New-Item -ItemType Junction `
-  -Path "$HOME\.dsh\profiles\node_modules\dsh-pm-mode" `
-  -Target "E:\dsh\dsh-plugin-pm-mode"
+This package is a **profile bundle**: `package.json` declares
+`dsh.bundle.patch`, and `cordis.patch.yml` inserts the host row. One command
+installs it into a profile — it links the package, registers the bundle and
+enables the row — and the change applies immediately through HMR:
+
+```
+plugin_manager action=install_bundle target=E:\dsh\dsh-plugin-pm-mode
 ```
 
-A Junction-mounted package resolves ESM imports against the repository's real
-path, where `@deepseek-ai/*` is **not** resolvable. This package therefore
-carries its own `node_modules/@deepseek-ai` links:
+Do not write the profile's `package.json` or `cordis.patch.yml` by hand, do not
+Junction the package into `$DSH_HOME\profiles\node_modules`, and do **not**
+hand-build a `node_modules/@deepseek-ai` junction farm inside this repository.
 
-```powershell
-$dsh = "C:\Users\<you>\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai"
-New-Item -ItemType Directory -Force "E:\dsh\dsh-plugin-pm-mode\node_modules\@deepseek-ai"
-foreach ($dep in @("dsh-tools","cordis","schemastery","dsh-scope","dsh-llm","dsh-system-prompt","dsh-util-values","dsh-typert-protocol")) {
-  New-Item -ItemType Junction -Path "E:\dsh\dsh-plugin-pm-mode\node_modules\@deepseek-ai\$dep" -Target "$dsh\$dep"
-}
-```
+> **Why the old Junction method broke on Desktop 0.2.0:** a Junction-mounted
+> package resolves its `@deepseek-ai/*` peers against
+> `$DSH_HOME\profiles\node_modules`, which the Desktop module resolver treats as
+> an **obsolete fallback** and rejects. That farm pointed at a
+> `AppData\Roaming\npm` install which the Desktop app does not use, so those
+> links also resolved to a stale `0.1.5-rc.1` generation.
+> `install_bundle` links the package under the profile instead, so `cordis`,
+> `dsh-tools`, `schemastery`, `dsh-scope`, `dsh-llm`, `dsh-system-prompt`,
+> `dsh-util-values` and `dsh-typert-protocol` all resolve from the app's own
+> install.
+
+Whether the new row mounts without a restart depends on the profile's
+`patchReload`: `install_bundle` applies live in this deployment (`application:
+applied`), so no restart is needed to mount the row. A **code** change inside
+this directory still needs a process restart, because Node's ESM module cache
+holds the old generation for the same specifier.
+(`restart-pm-mode.ps1` in `$DSH_HOME` is a one-shot detached restarter:
+it records the replacement pid *before* retiring the old server and hands the
+health probe to a separate process, because a restarter torn down by its own
+`taskkill` otherwise never reports anything.)
 
 ### 2. The host row
 
-Append to `$HOME\.dsh\profiles\web\cordis.patch.yml`:
+Supplied by `cordis.patch.yml` in this package — nothing to append by hand:
 
 ```yaml
 - insert:
@@ -176,19 +280,13 @@ Append to `$HOME\.dsh\profiles\web\cordis.patch.yml`:
       name: dsh-pm-mode
 ```
 
-Whether the new row mounts without a restart depends on the profile's
-`patchReload`: the shipped `web` template is `live`, so `watchUserPatches` is
-registered and a **valid** edit to this file recomposes the running app on the
-spot (a rejected edit leaves the last good app running); a profile declaring
-`startup` reads the file at boot only and needs a **restart of `dsh web`**.
-(`restart-pm-mode.ps1` in `$DSH_HOME` is a one-shot detached restarter:
-it records the replacement pid *before* retiring the old server and hands the
-health probe to a separate process, because a restarter torn down by its own
-`taskkill` otherwise never reports anything.)
+To change the row, override it by id in the profile's `cordis.patch.yml` (a
+matching override replaces the whole `config`).
 
 ### 3. The agent preset
 
-Copy `preset/` into `$HOME\.dsh\.agent-presets\pm\`. Its board row is:
+Install once by copying `preset/` into `$HOME\.dsh\.agent-presets\pm\`. Its
+board row is:
 
 ```yaml
 - id: pm-tools
@@ -208,15 +306,21 @@ session picks it up. An already-running session keeps the composition it joined.
 
 ### 4. Verify
 
-- `GET /pm-mode/__health__` → 200 with `{"service":"pm-mode","magic":"pm-mode-ok",…}`.
-- `window.__DSH_BOOT__.entries` contains id `dsh-pm-mode`.
-- Refresh the browser once, then start a session on the `pm` preset and call
-  `pm_task action=create`.
+- the row `include:pm-mode` reports `enabled: true, fiberPhase: "active"`
+  (`plugin_manager action=list_plugins`); the board row `pm-tools` is checked by
+  starting a session on the `pm` preset,
+- `pm_mode action=summary` answers with a board summary — that single call
+  proves the host service, the tool row and the store are all live, and
+- `GET /pm-mode/__health__` → 200 with
+  `{"service":"pm-mode","magic":"pm-mode-ok",…}`.
 
 **Do not probe `/plugins/<id>/client.js` directly.** Every deployment plugin
 404s there (doc-present and skill-panel included): the real artifacts are served
 through a combo URL whose `rev` appears only in `__DSH_BOOT__` inside the
 authenticated index HTML. That single path is a false-alarm generator.
+
+Board data lives under `$DSH_HOME\pm-mode`, not inside the plugin package, so
+reinstalling the bundle leaves every existing board and memory entry in place.
 
 ## Tools
 
@@ -225,6 +329,7 @@ authenticated index HTML. That single path is a false-alarm generator.
 | `pm_mode` | `summary`, `tasks`, `experts`, `timeline`, `agents`, `resources`, `define-resource`, `grant`, `revoke`, `note` |
 | `pm_task` | `create`, `update`, `phase`, `link`, `list` |
 | `pm_agent` | `list`, `recommend`, `domain`, `bind`, `unbind`, `ctx` |
+| `pm_memory` | `remember`, `recall`, `list`, `update`, `forget` |
 | `subagent_expert` | no actions — one call dispatches one expert (see below) |
 
 The three board actions that carry the model:
@@ -305,14 +410,22 @@ to be generic. `DEFAULT_EXPERT_MODEL` is now empty on purpose, and:
 | `GET /pm-mode/__api__/state?sessionId=…&windowMs=…` | one board: summary + gantt + metrics + tasks + **domains + experts** + resources + **settings** + notes |
 | `GET /pm-mode/__api__/boards` | every board on disk, newest first |
 | `GET /pm-mode/__api__/models` | the expert-model catalog: providers, models, the active route, and the effort ids that route accepts |
-| `POST /pm-mode/__api__/manage` | panel mutations — **loopback only**; a LAN reader can view but never rewrite. Board actions plus `set-expert-model` (the plugin setting, validated against the live LLM adapter before it is written) |
+| `GET /pm-mode/__api__/memory` | one project's experience memory (`?sessionId=…` resolves that board's project, `?project=<key\|绝对路径>` names one directly; `q` / `kind` / `limit` filter) |
+| `POST /pm-mode/__api__/manage` | panel mutations — **loopback only**; a LAN reader can view but never rewrite. Board actions, the memory writes (`memory-remember`, `memory-forget`, same store methods the tool uses), plus `set-expert-model` (the plugin setting, validated against the live LLM adapter before it is written) |
 
 ## Configuration
 
 - Board root: `DSH_HOME` (default `~/.dsh`) + `/pm-mode`, one directory per
   session holding `board.json`, written atomically (tmp + rename). The document
   is at `version: 2`; a `v1` board (no `domains`) is read as-is, so upgrading
-  throws nothing away.
+  throws nothing away. A board also records the session's **project** (`projectKey`
+  / `projectRoot`), which is what the 经验 tab reads to find its memory — resolved
+  from the agent's own cwd on every `open()`, never from the harness process's.
+- Experience memory: `DSH_HOME/pm-mode/memory/`, a directory INSIDE the board
+  root so `listBoardIds()` skips it for free (it reports a directory as a board
+  only when its `board.json` reads). `index.json` is the project registry and
+  `<key>.json` one project's entries; both written atomically and plain enough to
+  hand-edit.
 - Plugin settings: `DSH_HOME/pm-mode/settings.json`, a FILE beside the board
   directories (`listBoardIds()` only treats subdirectories as boards). Written
   atomically; read on every call rather than cached, so a change cannot be
@@ -323,18 +436,19 @@ to be generic. `DEFAULT_EXPERT_MODEL` is now empty on purpose, and:
 ## Development
 
 ```powershell
+node scripts/probe-memory.mjs            # 47 checks: project identity, the write/read/forget paths, pruning, ranking
 node scripts/smoke.mjs                 # 125 checks: store, domains, dispatch material, leases, legacy ids, settings, delegation, metrics, persistence
-node scripts/check-tools.mjs           # 49 checks: compiled schemas against a real ToolRuntime, expert tool included
-node scripts/check-client.mjs          # 38 checks: the inlined bundle stays in sync with its modules, token-only colours, the model picker
+node scripts/check-tools.mjs           # 66 checks: compiled schemas against a real ToolRuntime, expert tool and the memory write gate included
+node scripts/check-client.mjs          # 55 checks: the inlined bundle stays in sync with its modules, token-only colours, the model picker, a poll that stays silent, the 经验 tab's delete path
 node scripts/check-terms.mjs           # vocabulary: no project-specific term outside the two documented allowances
 cd $HOME\.dsh\profiles
-node E:/dsh/dsh-plugin-pm-mode/scripts/check-settings-routes.mjs  # 23 checks: the panel's settings routes over a fake llm
-node E:/dsh/dsh-plugin-pm-mode/scripts/validate-preset.mjs   # 57 checks: the preset composition, its depth tiers, its doctrine
+node E:/dsh/dsh-plugin-pm-mode/scripts/check-settings-routes.mjs  # 39 checks: the panel's settings AND memory routes over a fake llm
+node E:/dsh/dsh-plugin-pm-mode/scripts/validate-preset.mjs   # 68 checks: the preset composition, its depth tiers, its doctrine, and that the memory reaches both halves
 node E:/dsh/dsh-plugin-pm-mode/scripts/sync-preset.mjs       # snapshot vs live preset (`--mirror` publishes a repo-side change)
 ```
 
-`lib/store.js`, `lib/collector.js`, `lib/routes.js`, `lib/tools.js` and
-`lib/expert*.js` import nothing from dsh except `lib/expert-tool.js`, which
+`lib/store.js`, `lib/collector.js`, `lib/routes.js`, `lib/tools.js`, `lib/memory.js`
+and `lib/expert*.js` import nothing from dsh except `lib/expert-tool.js`, which
 imports `defineTool` (the mandatory compilation step — see trap 1). The last
 three scripts must run **from the profile root**, because they resolve
 `@deepseek-ai/*` and the composition's bare specifiers through the deployment's
@@ -349,9 +463,38 @@ absent, an error boot swallows. Confirm the new route answers
 (`GET /pm-mode/__health__`) instead of assuming the edit took. Client-half
 changes need a page refresh unless a bundle watcher is rebuilding.
 
+Node caches the host modules for the process lifetime, so a restart is the only
+reliable path — and **doing it wrong takes the server down**, which is what
+happened here three times before the shape was fixed. The rule is that nothing
+involved in the restart may wait inside the server's own process tree:
+
+1. **Never block in the turn that requests the restart.** A `Start-Sleep` (or any
+   poll) in the requesting tool call is a child of the server being restarted, so
+   it dies with it — the turn is interrupted, the outcome never observed, and a
+   reload that actually WORKED reads as a failure. This is the mistake that made
+   three restarts look broken.
+2. **Never launch the restarter as an ordinary child process.** `Start-Process`
+   still lands inside the harness's job object, so a `taskkill` of the tree (or
+   the harness retiring a timed-out turn) kills the restarter mid-flight — with
+   the server already stopped. That is the real hazard: not a failed reload, an
+   outage. Use `$HOME\.dsh\reload-pm-mode-safe.ps1`, which hands the restarter to
+   WMI (`Win32_Process.Create`, running as SYSTEM outside every job object this
+   process owns), returns immediately, and lets that detached process do the
+   stop → wait-for-port → start → verify sequence.
+3. **Read the outcome from a FILE on a later turn**, never by waiting now:
+   `$HOME\.dsh\pm-mode-safe-restart-status.txt` holds `PASS` / `PARTIAL` / `FAIL`
+   plus the new pid, and `pm-mode-safe-restart.log` holds the sequence. The
+   wrapper CLEARS the status file before queueing, so a stale `PASS` can never be
+   read as this run's result.
+
+The verification probe matters as much as the mechanics: `-ExpectTag` must be a
+string only the NEW code emits (`projectKey` for the memory work), because the
+health endpoint and the old routes answer identically before and after a reload —
+a tag the old build also produces makes the check pass while proving nothing.
+
 ## Known traps
 
-Four failures that each cost real time, recorded so the next person does not
+Five failures that each cost real time, recorded so the next person does not
 pay for them again.
 
 ### 1. Every tool definition MUST go through `defineTool`
@@ -432,6 +575,32 @@ The shipped arrangement is therefore deliberate and asserted in
 | the plugin's expert tool (`lib/expert-tool.js`) | from the setting, default 2 | expert at 1, its helper at 2 |
 | `tool-subagent-fork` | 2 | the dispatcher's review child at 1, an expert's second opinion at 2 |
 | `tool-subagent` (scout) | 2 | a scout spawned at 2 **cannot** spawn a scout — "helpers only execute" is enforced by the runtime on this route, not merely requested by its persona |
+
+### 5. A resolved project is `{key, root}`; passing the key alone loses the root
+
+The experience memory is keyed by project, and a resolved project has TWO halves:
+the `key` that names its document, and the `root` it was derived from. Passing
+only the key — which looks completely natural, since the key is what every
+message and the panel display — makes the store re-derive a key FROM the key, and
+the project that was just handed to it becomes unfindable.
+
+This shipped broken three ways at once, and all three were found by the route
+test rather than by reading the code:
+
+- `memory.remember(identity, { project: identity.key })` — the key went in as an
+  OVERRIDE, so the store re-resolved a project whose document did not exist yet.
+  That is the ordinary FIRST write, and it was refused;
+- `routes.js` built `{key, root}` and then passed `project: project.key`, with the
+  same effect;
+- `memory.view(resolved.key)` dropped the root on the read path, so `GET
+  /__api__/memory?project=<path>` answered 500 for a directory that resolved
+  perfectly one line earlier.
+
+The guard that makes this class of bug impossible is in `projectFor`: an
+identity arriving with a key and NO root must already exist on disk, and a key
+that cannot be found is an ERROR rather than a silent fall-through to a derived
+key. Silence is what made all three survive review — a write that quietly lands
+in a document nobody ever reads looks exactly like a successful write.
 
 ## License
 

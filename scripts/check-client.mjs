@@ -311,6 +311,138 @@ ok(
 const inkOffenders = [...clientSource.matchAll(/\bcolor\s*:\s*COLORS[\w.]*/g)].map((match) => match[0]);
 ok("no chart-palette value is used as ink", inkOffenders.length === 0, inkOffenders.join(", "));
 
+// ── 5. the 经验 tab: the one surface where a WRONG entry must be removable ────
+// The memory's whole value is that it outlives the session that wrote it, which
+// is also its whole risk: an entry that is wrong, stale, or was never true keeps
+// misleading every later session that recalls it. The user's own requirement was
+// that a human can delete a mis-remembered entry, so the panel must offer delete
+// on the entry itself — and the tab must not be gated behind "this board has
+// tasks", because a fresh session's board is empty exactly when the project's
+// accumulated knowledge is most worth reading.
+section("the 经验 tab: readable, correctable, deletable");
+
+const tabsExpression = extractExpression(clientSource, "TABS");
+ok(
+  "the tab bar carries the 经验 tab",
+  /id:\s*"memory"/.test(tabsExpression),
+  tabsExpression.replace(/\s+/g, " ").slice(0, 220),
+);
+ok(
+  "the memory tab is rendered BEFORE the empty-board branch",
+  (() => {
+    // Anchored to the branch CHAIN in the drawer's body (`else if (state.tab ===
+    // "memory") { … } else if (data.summary.counts.total === 0)`), because the
+    // empty-board sentence appears earlier in the file inside `emptyBoardState`
+    // and matching that one would assert nothing about this ordering.
+    const memoryBranch = clientSource.indexOf('} else if (state.tab === "memory") {');
+    const emptyBranch = clientSource.indexOf("} else if (data.summary.counts.total === 0) {");
+    return memoryBranch > 0 && emptyBranch > 0 && memoryBranch < emptyBranch;
+  })(),
+  "a board with no tasks must still show the project's memory",
+);
+ok(
+  "the memory view offers 删除 on every entry",
+  /title: "删掉这条[^"]*"/.test(clientSource) && /action: "memory-forget"/.test(clientSource),
+  "the requirement this surface exists for",
+);
+ok(
+  "the memory view offers 改正 too (correcting beats deleting-and-retelling)",
+  /action: "memory-remember"/.test(clientSource) && /saveEdit|memoryEdit/.test(clientSource),
+  "a half-right entry should be fixable in place",
+);
+ok(
+  "a panel write names the PROJECT, so it cannot land in the browsing process's cwd",
+  /project: data\.project\.key/.test(clientSource),
+  "the drawer can be open on any conversation",
+);
+ok(
+  "memory reads are keyed by the session on screen",
+  /__api__\/memory\?sessionId=/.test(clientSource),
+  "the route resolves that board's recorded project",
+);
+ok(
+  "the memory read is silent on a poll, like the board read",
+  /function refreshMemory\(sessionId, options\)/.test(clientSource) &&
+    /silent && store\.memory !== null/.test(clientSource),
+  "a background tick must not blank a readable list",
+);
+ok(
+  "entering the tab is what fetches it (not every open)",
+  /if \(tab\.id === "memory" && store\.memory === null\) refreshMemory\(store\.sessionId\);/.test(clientSource),
+  "no other tab should pay that round trip",
+);
+
+// ── 6. a background poll must not announce itself ─────────────────────────────// The reported defect: the drawer polls the board every 1.5s, and every tick set
+// `loading`, so 刷新中… appeared and vanished 40 times a minute while the drawer,
+// the tool cards and the header button outside it re-rendered twice per tick.
+// Polling is not an operation the reader asked for, so it must be silent.
+section("the board poll is invisible");
+
+const refreshSource = extractFunction(clientSource, "function refresh(sessionId, windowMs, allBoards, options)");
+
+ok(
+  "refresh reads the silent option",
+  /var silent = options !== undefined && options\.silent === true;/.test(refreshSource),
+  "a poll cannot be told apart from a reader-initiated read",
+);
+ok(
+  "refresh flags loading only when it has something to report",
+  /var showLoading = !silent \|\| store\.data === null;/.test(refreshSource) &&
+    /setState\(showLoading \? \{ loading: true, error: null \} : \{\}\);/.test(refreshSource),
+  "the loading flag must not be set on a silent read that already has data on screen",
+);
+ok(
+  "a failed silent poll keeps the last good board and stays quiet",
+  /silent && store\.data !== null \? \{ loading: false, error: null \}/.test(refreshSource),
+  "one failed read must not blank a readable panel",
+);
+
+const pollCalls = [...clientSource.matchAll(/refresh(?:Memory)?\([^;]*?\);/g)].map((match) => match[0]);
+ok(
+  "every poll call site is silent",
+  pollCalls.filter((call) => call.includes("{ silent: true }")).length >= 3,
+  "silent call sites: " +
+    JSON.stringify(pollCalls.filter((call) => call.includes("sync.target") || call.includes("store.sessionId, store.windowMs"))),
+);
+ok(
+  "the ⟳ button still reports progress",
+  /onClick: function \(\) \{\s*refresh\(store\.sessionId, store\.windowMs, store\.allBoards\);\s*\}/.test(clientSource),
+  "a reader-initiated read passing { silent: true } would look like nothing happened",
+);
+ok(
+  "one slow poll cannot stack a second on top",
+  /if \(inflight\[query\] === true\) return Promise\.resolve\(\);/.test(refreshSource) &&
+    (refreshSource.match(/delete inflight\[query\];/g) ?? []).length === 2,
+  "both settle paths must clear the in-flight mark",
+);
+// The ⟳ button, the board picker and the window buttons keep the bare call —
+// a reader-initiated read SHOULD say it is working. What must stay explicit is
+// the timer: its body is the code that flashed a spinner 40 times a minute.
+//
+// The body is now one named call (`pollTick()`), because the memory read made
+// an inline body long enough to be worth extracting — and a long timer body is
+// exactly what this check exists to stop. So the assertion moved with it: the
+// three silent calls must live inside `pollTick`, and the timer must call
+// nothing else.
+const timerBody = clientSource.slice(clientSource.indexOf("setInterval(function () {"), clientSource.indexOf("}, 1500);"));
+ok(
+  "the timer body does nothing but call pollTick",
+  /setInterval\(function \(\) \{\s*pollTick\(\);\s*\}, 1500\);/.test(clientSource),
+  "timer body: " + JSON.stringify(timerBody.replace(/\s+/g, " ").slice(0, 200)),
+);
+const pollTickBody = extractFunction(clientSource, "function pollTick()");
+const pollTickCalls = [...pollTickBody.matchAll(/refresh(?:Memory)?\([^;]*\);/g)].map((match) => match[0]);
+ok(
+  "every call inside pollTick is explicit about being silent",
+  pollTickCalls.length === 4 && pollTickCalls.every((call) => call.includes("{ silent: true }")),
+  "calls in pollTick: " + JSON.stringify(pollTickCalls),
+);
+ok(
+  "the poll interval is still the 1.5s live view",
+  /setInterval\(function \(\) \{[\s\S]{0,200}?\}, 1500\);/.test(clientSource),
+  "the Gantt is a live view; silence is the fix, not a slower poll",
+);
+
 // ── summary ───────────────────────────────────────────────────────────────────
 console.log("\n" + (failures.length === 0 ? "✅ " + checks + " checks passed" : "❌ " + failures.length + " of " + checks + " checks FAILED"));
 for (const failure of failures) console.log("   - " + failure);

@@ -237,6 +237,129 @@ ok(
   JSON.stringify(storeModule.DEFAULT_EXPERT_MODEL),
 );
 
+// ── the experience memory reaches BOTH halves ────────────────────────────────
+// The board store OWNS the memory, the host half publishes it on `pmMode`, and
+// the preset row has to hand it to the tool factory. A missed hand-off is
+// invisible at every other layer — `createPmTools` defaults to `store.memory`,
+// so the tools keep working while the PRESET path silently depends on a default
+// — so the wiring is exercised here by actually applying the row against a stub
+// context and inspecting what it registers.
+console.log("\nproject experience memory: storage, and both composition halves");
+const memoryModule = await import("dsh-pm-mode/memory").catch((error) => ({ __error: String(error && error.message) }));
+ok(
+  "the memory module resolves and exports its store factory",
+  typeof memoryModule.createMemoryStore === "function" &&
+    typeof memoryModule.resolveProjectRoot === "function" &&
+    typeof memoryModule.projectKeyOf === "function",
+  String(memoryModule.__error ?? ""),
+);
+ok(
+  "the four kinds ship with the plugin (token / gotcha / recipe / finding)",
+  Array.isArray(memoryModule.MEMORY_KINDS) &&
+    ["token", "gotcha", "recipe", "finding"].every((kind) => memoryModule.MEMORY_KINDS.includes(kind)),
+  JSON.stringify(memoryModule.MEMORY_KINDS),
+);
+
+const hostModule = await import("dsh-pm-mode").catch((error) => ({ __error: String(error && error.message) }));
+ok(
+  "the host half exports the memory store factory for the board store",
+  typeof hostModule.createPmToolset === "function",
+  String(hostModule.__error ?? ""),
+);
+
+// Apply the preset row for real: one stub context, then read the registrations
+// back. The stub records every tool definition the row publishes.
+const registeredTools = [];
+let promptSections = 0;
+const stubBoard = {
+  store: { memory: { __marker: "the-board's-memory-store" } },
+  collector: { liveStatus: () => ({}) },
+  subagents: undefined,
+  memory: { __marker: "the-board's-memory-store" },
+  expertModel: () => ({ provider: "", model: "", reasoningEffort: "", maxDepth: 2, configured: false }),
+  delegateExpert: () => {
+    throw new Error("not called");
+  },
+};
+let applyError = "";
+try {
+  presetModule.apply({
+    pmMode: stubBoard,
+    tools: {
+      register: (definition) => {
+        registeredTools.push(definition);
+        return () => {};
+      },
+    },
+    systemPrompt: {
+      section: () => {
+        promptSections += 1;
+        return () => {};
+      },
+    },
+    effect: (callback) => {
+      const dispose = callback();
+      return typeof dispose === "function" ? dispose : () => {};
+    },
+  });
+} catch (error) {
+  applyError = String(error && error.message ? error.message : error);
+}
+ok(
+  "the preset row applies against a pmMode service and registers its tools",
+  applyError === "" && registeredTools.length === 5,
+  applyError !== "" ? applyError : "registered " + registeredTools.map((tool) => tool.name).join(","),
+);
+ok(
+  "the applied row actually exposes pm_memory (not just the factory)",
+  registeredTools.some((tool) => tool.name === "pm_memory"),
+  registeredTools.map((tool) => tool.name).join(","),
+);
+ok(
+  "the row publishes exactly one prompt section carrying the memory doctrine",
+  promptSections === 1 &&
+    typeof presetModule.PROMPT_SECTION === "string" &&
+    presetModule.PROMPT_SECTION.includes("pm_memory") &&
+    presetModule.PROMPT_SECTION.includes("子专家完全无感知"),
+  "sections=" + String(promptSections) + " mentions=" + String(presetModule.PROMPT_SECTION.includes("pm_memory")),
+);
+ok(
+  "the preset doctrine states the WRITE GATE, not just the tool name",
+  typeof presetModule.PROMPT_SECTION === "string" &&
+    presetModule.PROMPT_SECTION.includes("有别于常识") &&
+    presetModule.PROMPT_SECTION.includes("靠常识会做错") &&
+    presetModule.PROMPT_SECTION.includes("不要写"),
+  "the doctrine is what keeps the store from filling with the obvious",
+);
+ok(
+  "the preset doctrine says a stale entry must be deleted",
+  typeof presetModule.PROMPT_SECTION === "string" && presetModule.PROMPT_SECTION.includes("forget"),
+  "a memory nobody prunes misleads every later session",
+);
+
+// The host prompt section is the OTHER place the dispatcher is taught the tool,
+// and it is the one that applies even before the preset row's own section.
+const hostIndex =
+  (await import("node:fs")).readFileSync(
+    (await import("node:path")).join((await import("node:url")).fileURLToPath(new URL(".", import.meta.url)), "..", "lib", "index.js"),
+    "utf8",
+  );
+ok(
+  "the host prompt section teaches pm_memory too (recall before dispatch, forget for stale)",
+  hostIndex.includes("pm_memory") && hostIndex.includes("action=recall") && hostIndex.includes("action=forget"),
+  "the host section is not optional: it is what a dispatcher reads even without the row's own section",
+);
+ok(
+  "the host publishes the memory store on the pmMode service",
+  /memory:\s*store\.memory/.test(hostIndex),
+  "the preset row reads it off that object",
+);
+ok(
+  "the host panel router is built with the memory store",
+  /createPanelRouter\(\{[\s\S]{0,200}?memory:\s*store\.memory/.test(hostIndex),
+  "the 经验 tab reads through that router",
+);
+
 // The structural version of the same promise: no shipped source may name a
 // vendor or a model, so a future edit cannot quietly re-introduce a default.
 // Comments are stripped first — these files document the value that was removed,

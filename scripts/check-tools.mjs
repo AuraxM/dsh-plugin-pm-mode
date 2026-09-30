@@ -155,8 +155,8 @@ ok(
   agentSchema === undefined ? "pm_agent missing" : JSON.stringify(agentSchema.parameters.type),
 );
 ok(
-  "the board toolset is exactly the three PM tools plus the expert gate",
-  toolset.map((tool) => tool.name).join(",") === "pm_mode,pm_task,pm_agent,subagent_expert",
+  "the board toolset is exactly the four PM tools plus the expert gate",
+  toolset.map((tool) => tool.name).join(",") === "pm_mode,pm_task,pm_agent,pm_memory,subagent_expert",
   toolset.map((tool) => tool.name).join(","),
 );
 ok(
@@ -216,6 +216,59 @@ ok(
   agentSchema === undefined ? "pm_agent missing" : agentSchema.description.slice(0, 160),
 );
 
+// The experience memory is the one tool whose DIFFICULTY is not the plumbing but
+// the doctrine: a memory that accepts everything the model already knows costs
+// more than it saves. So the write GATE is asserted, not just the schema — the
+// description has to carry the test the writer applies to itself.
+console.log("\nthe experience-memory tool: schema AND its write gate");
+const memorySchema = schemas.find((item) => item.name === "pm_memory");
+ok("pm_memory is visible after registration", memorySchema !== undefined);
+for (const action of ["remember", "recall", "list", "update", "forget"]) {
+  ok(
+    "pm_memory exposes action=" + action,
+    memorySchema !== undefined && memorySchema.parameters.properties.action.enum.includes(action),
+    memorySchema === undefined ? "pm_memory missing" : JSON.stringify(memorySchema.parameters.properties.action.enum),
+  );
+}
+ok(
+  "pm_memory carries the fields a durable entry needs (title/text/evidence/tags/kind/query/id)",
+  memorySchema !== undefined &&
+    ["title", "text", "evidence", "tags", "kind", "query", "id"].every((field) => memorySchema.parameters.properties[field] !== undefined),
+  memorySchema === undefined ? "pm_memory missing" : Object.keys(memorySchema.parameters.properties).join(","),
+);
+ok(
+  "kind offers the four kinds as an enum, not free text",
+  memorySchema !== undefined &&
+    Array.isArray(memorySchema.parameters.properties.kind.enum) &&
+    ["token", "gotcha", "recipe", "finding"].every((kind) => memorySchema.parameters.properties.kind.enum.includes(kind)),
+  memorySchema === undefined ? "pm_memory missing" : JSON.stringify(memorySchema.parameters.properties.kind.enum),
+);
+ok(
+  "the description states the WRITE GATE (a fact the next agent would get right unaided is noise)",
+  memorySchema !== undefined &&
+    memorySchema.description.includes("有别于常识") &&
+    memorySchema.description.includes("下一个 Agent 会做错吗？"),
+  memorySchema === undefined ? "pm_memory missing" : memorySchema.description.slice(0, 200),
+);
+ok(
+  "the description demands EVIDENCE, so a later session can re-check the claim",
+  memorySchema !== undefined && memorySchema.description.includes("evidence 要写清楚凭什么"),
+  memorySchema === undefined ? "pm_memory missing" : memorySchema.description.slice(0, 200),
+);
+ok(
+  "the description says a wrong entry must be DELETED, and names the panel path",
+  memorySchema !== undefined &&
+    memorySchema.description.includes("必须删掉") &&
+    memorySchema.description.includes("经验") &&
+    memorySchema.description.includes("forget"),
+  memorySchema === undefined ? "pm_memory missing" : memorySchema.description.slice(-200),
+);
+ok(
+  "the description keeps memory dispatcher-only (subagents never see it)",
+  memorySchema !== undefined && memorySchema.description.includes("子专家"),
+  memorySchema === undefined ? "pm_memory missing" : memorySchema.description.slice(0, 200),
+);
+
 // The expert tool moved OUT of the composition and INTO the plugin, which is
 // the moment its schema became hand-writable again. Assert on the projection,
 // not on `createExpertTool` returning something.
@@ -273,6 +326,49 @@ const missingAction = validateJsonSchemaValue(taskSchema.parameters, { title: "x
 ok("a call without the required discriminator is rejected", missingAction.length > 0, JSON.stringify(missingAction));
 const goodArgs = validateJsonSchemaValue(taskSchema.parameters, { action: "create", title: "x" }, "");
 ok("a valid call passes", goodArgs.length === 0, JSON.stringify(goodArgs));
+
+// A board must learn its PROJECT from an ordinary tool call, not only from a
+// memory call. The 经验 tab reads the board to find the project the conversation
+// on screen belongs to, so a session that had merely created a task used to show
+// an empty tab — and the first `pm_memory remember` had no recorded project to
+// fall back on. Driven through the COMPILED definition, so this also proves the
+// tagging really happens on the path a model call takes.
+console.log("\nan ordinary tool call records the session's project on its board");
+
+const sandboxHome = fs.mkdtempSync(path.join(os.homedir(), ".pmb-tools-fixture-"));
+fs.mkdirSync(path.join(sandboxHome, ".git"), { recursive: true });
+const previousDshHome = process.env.DSH_HOME;
+process.env.DSH_HOME = root;
+const taggingStore = new BoardStore({ root });
+const taggingTools = createPmToolset({
+  store: taggingStore,
+  collector: { liveStatus: () => ({}) },
+  subagents: () => undefined,
+});
+const pmTaskDefinition = taggingTools.find((tool) => tool.name === "pm_task");
+const fakeExec = { agent: { id: "session-tag-1", session: { header: { cwd: sandboxHome } } } };
+try {
+  await pmTaskDefinition.execute({ action: "create", title: "标签检查" }, fakeExec);
+} catch (error) {
+  ok("pm_task executes against a fake agent context", false, String(error && error.message ? error.message : error));
+}
+const taggedBoard = taggingStore.get("session-tag-1");
+ok(
+  "a pm_task call tags the board with the session's project",
+  taggedBoard !== null && taggedBoard.projectKey !== "" && taggedBoard.projectRoot === sandboxHome,
+  JSON.stringify({ key: taggedBoard === null ? null : taggedBoard.projectKey, root: taggedBoard === null ? null : taggedBoard.projectRoot }),
+);
+ok(
+  "the tagged board reaches its own project's memory without being told",
+  (() => {
+    const forSession = taggingStore.memoryFor("session-tag-1", sandboxHome);
+    return forSession.key !== "" && forSession.root === sandboxHome;
+  })(),
+  "pm_memory must not need project= for the session it is running in",
+);
+if (previousDshHome === undefined) delete process.env.DSH_HOME;
+else process.env.DSH_HOME = previousDshHome;
+fs.rmSync(sandboxHome, { recursive: true, force: true });
 
 // Negative control. Without this the check above could pass for the wrong
 // reason — e.g. if `schemas()` one day started compiling parameters itself,

@@ -1,0 +1,7 @@
+# PM Mode bundle: mounts the host row (tools, systemPrompt, webServer, timer)
+# that owns the board store, the runtime timeline collector and the panel route.
+# The `pm-tools` preset row (dsh-pm-mode/preset) is mounted separately by the
+# `pm` agent preset.
+- insert:
+    - id: pm-mode
+      name: dsh-pm-mode
