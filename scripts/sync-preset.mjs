@@ -1,6 +1,15 @@
 /**
- * Keep the `pm` agent preset's SNAPSHOT (this repo) in step with its LIVE copy
- * (`$DSH_HOME/.agent-presets/pm/`), which is the one the roster actually reads.
+ * Keep the `pm` agent preset's SNAPSHOT (this repo) in step with a legacy LIVE
+ * copy (`$DSH_HOME/.agent-presets/pm/`).
+ *
+ * NOTE (Desktop 0.2.0): that directory is NO LONGER what the roster reads. A
+ * preset is now an ordinary composition row, and this package ships it as
+ * `presets/pm.patch.yml`, GENERATED from `preset/agent.cordis.yml` by
+ * scripts/build-preset-patch.mjs. So `preset/agent.cordis.yml` — not the old
+ * directory — is the source of truth for what the picker shows.
+ *
+ * This tool is kept only for a deployment still running a pre-0.2.0 CLI, where
+ * the directory really was live. On 0.2.0 run build-preset-patch.mjs instead.
  *
  * Why a tool instead of "just remember to copy": the live copy is the one that
  * has to be edited, so the repo silently rots unless something checks. A stale

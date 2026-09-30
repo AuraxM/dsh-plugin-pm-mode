@@ -17,7 +17,10 @@
   },
   "dsh": {
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/pm.patch.yml"
+      ]
     },
     "client": {
       "platform": "web",
@@ -29,6 +32,7 @@
   "files": [
     "lib",
     "preset",
+    "presets",
     "cordis.patch.yml",
     "README.md"
   ],

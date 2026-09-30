@@ -559,8 +559,12 @@
         backgroundMode: one-shot
         maxDepth: provider-managed
 
-    - id: workflow-worker-thread
-      name: '@deepseek-ai/dsh-workflow-worker-thread'
+    # 0.1.x shipped this as `@deepseek-ai/dsh-workflow-worker-thread`; 0.2.0
+    # renamed it to `@deepseek-ai/dsh-workflow-ptc` (the shipped `standard`
+    # preset uses the new name). The old specifier no longer resolves, so the
+    # row would have failed the whole preset's activation.
+    - id: workflow-ptc
+      name: '@deepseek-ai/dsh-workflow-ptc'
       config:
         provider: spawn
 

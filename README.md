@@ -285,8 +285,39 @@ matching override replaces the whole `config`).
 
 ### 3. The agent preset
 
-Install once by copying `preset/` into `$HOME\.dsh\.agent-presets\pm\`. Its
-board row is:
+Supplied by the second patch file this bundle declares — nothing to copy by
+hand:
+
+```yaml
+# presets/pm.patch.yml
+- insert:
+    - id: preset-pm
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: pm
+        order: 9
+        plugins: [ ...the dispatcher composition... ]
+```
+
+On Desktop 0.2.0 a preset **is an ordinary composition row**: a
+`@deepseek-ai/dsh-agent-preset` entry whose `config.plugins` is the child list,
+exactly how `@deepseek-ai/dsh-web-app` ships `presets/*.patch.yml`. The
+`$DSH_HOME/.agent-presets/<id>/` directory this package originally targeted is a
+0.1.x-era convention that **nothing reads any more** — which is why the preset
+picker showed no `pm` mode even with the plugin row active and the host half
+working.
+
+`presets/pm.patch.yml` is GENERATED from `preset/agent.cordis.yml` (the
+snapshot `scripts/sync-preset.mjs` keeps in step with the old live copy):
+
+```sh
+node scripts/build-preset-patch.mjs          # regenerate
+node scripts/build-preset-patch.mjs --check  # fail if stale
+```
+
+Edit `preset/agent.cordis.yml` and regenerate; never hand-edit the patch file.
+
+Inside that list the board row is:
 
 ```yaml
 - id: pm-tools
@@ -301,14 +332,18 @@ complete plugin and needs no `config` channel. `inject` lives in that module
 immediately and throw on the absent `pmMode` instead of parking until the host
 row provides it.
 
-Editing the preset needs **no restart**: presets mount per session, so a new PM
-session picks it up. An already-running session keeps the composition it joined.
+Adding or editing the preset row needs a **process restart**, because a bundle's
+patch files are composed when the profile loads (only the profile's own
+`cordis.patch.yml` is watched). Once loaded, a preset mounts per session, so a
+new PM session picks it up and an already-running session keeps the composition
+it joined.
 
 ### 4. Verify
 
-- the row `include:pm-mode` reports `enabled: true, fiberPhase: "active"`
-  (`plugin_manager action=list_plugins`); the board row `pm-tools` is checked by
-  starting a session on the `pm` preset,
+- the row `include:pm-mode` reports `enabled: true, fiberPhase: "active"` and
+  `Config.listConfigs name=@deepseek-ai/dsh-agent-preset` lists a
+  `include:preset-pm` entry (`plugin_manager action=list_plugins`),
+- the preset picker on a **new** session offers `总控模式`,
 - `pm_mode action=summary` answers with a board summary — that single call
   proves the host service, the tool row and the store are all live, and
 - `GET /pm-mode/__health__` → 200 with
