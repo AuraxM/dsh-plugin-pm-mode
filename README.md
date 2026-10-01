@@ -55,22 +55,34 @@ row**, and that split is the whole design:
 
 | Half | Mounted by | Owns | Publishes |
 | --- | --- | --- | --- |
-| `lib/index.js` | the web profile's `cordis.patch.yml` (once per process) | the board store, the runtime timeline collector, the `/pm-mode` panel route, the `pmMode` service | `pmMode`, into the ROOT realm |
-| `lib/preset.js` | the `pm` agent preset's composition | nothing — it registers `pm_mode` / `pm_task` / `pm_agent` into *its own agent scope* | nothing |
+| `lib/index.js` | the web profile's `cordis.patch.yml` (once per process) | the board store, the runtime timeline collector, the `/pm-mode` panel route, the `/pm-mode` command | `pmMode`, into the ROOT realm — and **no tool, no prompt section** |
+| `lib/preset.js` | the `pm` agent preset's composition | nothing | `pm_mode` / `pm_task` / `pm_agent` / `pm_memory` + `subagent_expert`, into *its own agent scope* |
 
-Two consequences, both intended:
+Three consequences, all intended:
 
 1. **`pm_*` stays out of every other preset's tool catalog.** Tool lookup is a
    scope chain, and a preset's rows register into that preset's layer — so a
    `standard` session never sees these tools, while the storage underneath is
    still a single process-wide instance.
-2. **The preset row needs no `isolate` realm.** A row that provides no service
+2. **The host half must register nothing model-facing.** Its row is mounted by
+   the profile, i.e. it runs in a root context, and a root context's
+   `ctx.tools.register` writes into the process-**global** tool layer —
+   `ToolRuntime.view(scope)` seeds *every* agent's visible catalog from
+   `this.layers.global.tools.entries()`. Registering the toolset there publishes
+   `pm_*` (and a section teaching board discipline) to every preset in the
+   process. Earlier revisions of this plugin did exactly that; the symptom was a
+   `standard` session listing `pm_mode` / `pm_task` / `pm_agent` / `pm_memory`
+   plus the `[项目看板 pm-mode]` prompt block. Scope is the only thing separating
+   the two halves, so the publishing side is the side that has one — see
+   `scripts/validate-preset.mjs`, which applies both halves against stub
+   contexts and fails if the host registers a tool or a section.
+3. **The preset row needs no `isolate` realm.** A row that provides no service
    cannot leak one, and `pmMode` lives in the root realm precisely so a
    session-scoped row can read it. Wrapping that row in a realm would *hide*
    the service from it.
 
 Because a delegated child joins its parent's standing composition, every expert
-(and every helper an expert starts) gets the same three tools. That is intended:
+(and every helper an expert starts) gets the same toolset. That is intended:
 an expert records its internal split as child tasks on the dispatcher's board by
 passing the `boardId` it was given, so the split shows up in the panel instead
 of becoming a black box.
@@ -478,7 +490,7 @@ node scripts/check-client.mjs          # 55 checks: the inlined bundle stays in 
 node scripts/check-terms.mjs           # vocabulary: no project-specific term outside the two documented allowances
 cd $HOME\.dsh\profiles
 node E:/dsh/dsh-plugin-pm-mode/scripts/check-settings-routes.mjs  # 39 checks: the panel's settings AND memory routes over a fake llm
-node E:/dsh/dsh-plugin-pm-mode/scripts/validate-preset.mjs   # 68 checks: the preset composition, its depth tiers, its doctrine, and that the memory reaches both halves
+node E:/dsh/dsh-plugin-pm-mode/scripts/validate-preset.mjs   # 72 checks: the preset composition, its depth tiers, its doctrine, that the memory reaches both halves, and the two-half boundary (the host row registers no tool and no prompt section)
 node E:/dsh/dsh-plugin-pm-mode/scripts/sync-preset.mjs       # snapshot vs live preset (`--mirror` publishes a repo-side change)
 ```
 
@@ -529,7 +541,7 @@ a tag the old build also produces makes the check pass while proving nothing.
 
 ## Known traps
 
-Five failures that each cost real time, recorded so the next person does not
+Six failures that each cost real time, recorded so the next person does not
 pay for them again.
 
 ### 1. Every tool definition MUST go through `defineTool`
@@ -636,6 +648,36 @@ identity arriving with a key and NO root must already exist on disk, and a key
 that cannot be found is an ERROR rather than a silent fall-through to a derived
 key. Silence is what made all three survive review — a write that quietly lands
 in a document nobody ever reads looks exactly like a successful write.
+
+### 6. A row the PROFILE mounts is a root context, and its tools are global
+
+The two-half split was written down long before it was true. `lib/index.js`
+mounted by the profile's patch layer ran in a root context, and it registered the
+whole `pm_*` toolset plus a `[项目看板 pm-mode]` prompt section from there. Both
+landed in the process-**global** layer — `ToolRuntime.view(scope)` starts from
+`new Map(this.layers.global.tools.entries())` and only then stacks the scope
+chain — so EVERY preset in the process saw them:
+
+- a `standard` session listed `pm_mode` / `pm_task` / `pm_agent` / `pm_memory`;
+- its system prompt carried the dispatcher doctrine, i.e. instructions to update
+  a board and honour a `shared-env` lease for tools the same session may or may
+  not have;
+- and the same four tools were registered TWICE in a `pm` session (global layer +
+  preset scope). That duplicate is what made it survivable and therefore
+  invisible: scoped registrations shadow globals, so nothing errored, and the
+  redundant registration had no effect on the only preset that was supposed to
+  have it. A second registration that changes nothing is the signature of this
+  bug — the only sessions it affects are the ones it was never meant to reach.
+
+`tools.restrict()` is the other direction to look for (a per-agent `deny` solves
+the symptom for one preset at a time); the fix here is structural instead: the
+host row registers nothing and its `inject` no longer names `tools` or
+`systemPrompt`, so it cannot read either registry even by accident. Which side
+publishes is decided by scope: only the preset row has one.
+
+`scripts/validate-preset.mjs` applies BOTH halves against stub contexts and fails
+if the host registers a tool or a section — a source-text assertion would not
+have caught the original, because the original looked deliberate.
 
 ## License
 

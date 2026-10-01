@@ -267,12 +267,26 @@
           # collector and the same-origin `/pm-mode` panel route, and publishes the
           # `pmMode` service into the ROOT realm.
           #
-          # This row publishes NOTHING — it only reads that service and registers
-          # `pm_mode` / `pm_task` / `pm_agent` into THIS preset's agent scope. That
-          # split is what keeps `pm_*` out of every other preset's tool catalog while the
-          # storage underneath stays a single instance, and it is why this row needs no
-          # `isolate` realm: a row that provides no service cannot leak one, and a realm
-          # here would actually hide `pmMode` from it.
+          # The host row publishes NO tool and registers NO prompt section, and that is
+          # load-bearing rather than tidy: a row mounted by the profile runs in a root
+          # context, so its `ctx.tools.register` would land in the process-GLOBAL layer —
+          # the layer `ToolRuntime.view(scope)` seeds every agent's visible catalog from.
+          # Registering the toolset there publishes `pm_*` and its dispatcher doctrine to
+          # EVERY preset in the process, `standard` included. (Measured on the revision
+          # before this comment: a standard session's catalog carried pm_mode / pm_task /
+          # pm_agent / pm_memory plus a global「[项目看板 pm-mode]」section teaching board
+          # discipline to a session with no board tools.) The host half also injects no
+          # `tools`/`systemPrompt`, so it cannot read either registry even by accident.
+          #
+          # This row publishes NOTHING either — it only reads that service and registers
+          # `pm_mode` / `pm_task` / `pm_agent` / `pm_memory` into THIS preset's agent
+          # scope. That split is what keeps `pm_*` out of every other preset's tool
+          # catalog while the storage underneath stays a single instance, and it is why
+          # this row needs no `isolate` realm: a row that provides no service cannot leak
+          # one, and a realm here would actually hide `pmMode` from it.
+          # Verified by scripts/validate-preset.mjs, which APPLIES both halves against stub
+          # contexts: the host must register nothing, this row must register all five tools
+          # (`subagent_expert` included) and exactly one prompt section.
           #
           # The row names the package's `./preset` SUBPATH. The Loader's `unwrapExports`
           # falls back to the MODULE NAMESPACE when a module has no default export, and

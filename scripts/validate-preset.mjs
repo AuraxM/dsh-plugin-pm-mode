@@ -337,17 +337,81 @@ ok(
   "a memory nobody prunes misleads every later session",
 );
 
-// The host prompt section is the OTHER place the dispatcher is taught the tool,
-// and it is the one that applies even before the preset row's own section.
+// The host half must publish NO tool. That row is mounted by the profile, so its
+// context is a root one and `ToolRuntime.view(scope)` seeds every agent's
+// visible catalog from the process-global layer it would register into —
+// `pm_*` (and its dispatcher doctrine) would then appear in EVERY preset, a
+// `standard` session included. Measured before this check existed: a standard
+// session listed pm_mode / pm_task / pm_agent / pm_memory plus the host's
+// 「[项目看板 pm-mode]」 prompt section.
+//
+// Source history is not evidence, so the row is APPLIED here against a stub
+// context and the registrations are read back. The stub is deliberately
+// permissive: `tools` and `systemPrompt` are handed to the row as live
+// registries, so a re-introduced `ctx.tools.register` cannot pass by throwing.
 const hostIndex =
   (await import("node:fs")).readFileSync(
     (await import("node:path")).join((await import("node:url")).fileURLToPath(new URL(".", import.meta.url)), "..", "lib", "index.js"),
     "utf8",
   );
+const hostTools = [];
+const hostSections = [];
+const hostServices = [];
+let hostApplyError = "";
+try {
+  hostModule.apply({
+    logger: { info: () => {}, warn: () => {} },
+    get: () => undefined,
+    on: () => () => {},
+    interval: () => () => {},
+    provide: (serviceName, value) => {
+      hostServices.push({ serviceName, value });
+      return () => {};
+    },
+    effect: (callback) => {
+      const dispose = callback();
+      return typeof dispose === "function" ? dispose : () => {};
+    },
+    tools: {
+      register: (definition) => {
+        hostTools.push(definition);
+        return () => {};
+      },
+    },
+    systemPrompt: {
+      section: (section) => {
+        hostSections.push(section);
+        return () => {};
+      },
+    },
+    webServer: { register: () => () => {} },
+  });
+} catch (error) {
+  hostApplyError = String(error && error.message ? error.message : error);
+}
 ok(
-  "the host prompt section teaches pm_memory too (recall before dispatch, forget for stale)",
-  hostIndex.includes("pm_memory") && hostIndex.includes("action=recall") && hostIndex.includes("action=forget"),
-  "the host section is not optional: it is what a dispatcher reads even without the row's own section",
+  "the host half applies and publishes no model-facing tool",
+  hostApplyError === "" && hostTools.length === 0,
+  hostApplyError !== "" ? hostApplyError : "registered " + hostTools.map((tool) => tool.name).join(","),
+);
+ok(
+  "the host half publishes no prompt section either (a global section teaches a toolset the session may not have)",
+  hostSections.length === 0,
+  hostSections.map((section) => section.name).join(","),
+);
+ok(
+  "the host half still publishes pmMode for the preset row (and the panel) to read",
+  hostServices.some(
+    (entry) => entry.serviceName === "pmMode" && entry.value !== undefined && entry.value.store !== undefined,
+  ),
+  hostServices.map((entry) => entry.serviceName).join(","),
+);
+ok(
+  "the host half no longer depends on tools/systemPrompt (its row reads neither)",
+  Array.isArray(hostModule.inject) &&
+    !hostModule.inject.includes("tools") &&
+    !hostModule.inject.includes("systemPrompt"),
+  JSON.stringify(hostModule.inject),
 );
 ok(
   "the host publishes the memory store on the pmMode service",
