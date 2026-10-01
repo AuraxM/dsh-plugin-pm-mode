@@ -490,7 +490,7 @@ node scripts/check-client.mjs          # 55 checks: the inlined bundle stays in 
 node scripts/check-terms.mjs           # vocabulary: no project-specific term outside the two documented allowances
 cd $HOME\.dsh\profiles
 node E:/dsh/dsh-plugin-pm-mode/scripts/check-settings-routes.mjs  # 39 checks: the panel's settings AND memory routes over a fake llm
-node E:/dsh/dsh-plugin-pm-mode/scripts/validate-preset.mjs   # 72 checks: the preset composition, its depth tiers, its doctrine, that the memory reaches both halves, and the two-half boundary (the host row registers no tool and no prompt section)
+node E:/dsh/dsh-plugin-pm-mode/scripts/validate-preset.mjs   # the preset composition, its depth tiers, its doctrine, that the memory reaches both halves, and the two-half boundary (the host row registers no tool and no prompt section)
 node E:/dsh/dsh-plugin-pm-mode/scripts/sync-preset.mjs       # snapshot vs live preset (`--mirror` publishes a repo-side change)
 ```
 
@@ -500,6 +500,15 @@ imports `defineTool` (the mandatory compilation step — see trap 1). The last
 three scripts must run **from the profile root**, because they resolve
 `@deepseek-ai/*` and the composition's bare specifiers through the deployment's
 own resolver.
+
+A fresh 0.2.0 profile no longer hoists `yaml` to its own root, so
+`validate-preset.mjs` can fail there with `Cannot find module 'yaml'` **before
+checking anything** (it reads that package through `createRequire(profile/package.json)`,
+which is also how the Loader resolves the composition's bare specifiers). The
+package ships inside the app (`resources/app.asar` → `node_modules/yaml`); make it
+resolvable from the profile root — a `node_modules\yaml` junction or symlink is
+enough — or run the script on a profile that still has it. This is a harness
+packaging change, not a plugin one, and the failure is loud rather than silent.
 
 Host-half changes need a profile reload: either a valid edit to the profile's
 patch file on a `patchReload: live` profile, or a restart. **Do not trust the
