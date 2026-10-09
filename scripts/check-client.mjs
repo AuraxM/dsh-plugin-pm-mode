@@ -110,6 +110,35 @@ ok(
   "statusClass drifted between lib/client/gantt.js and the inlined copy",
 );
 
+// The statusClass check above was the whole gantt guard once, and the section
+// drifted anyway (props.orphans, the domainId badge, the empty-state wording
+// existed only in the bundle). Compare the WHOLE inlined region — marked with
+// `/* #region gantt */` in client.js — against the module with `export`
+// stripped and pad() dropped (client.js keeps its own pad for fmtTime).
+function firstDiff(a, b) {
+  if (a === b) return "";
+  const n = Math.min(a.length, b.length);
+  let at = 0;
+  while (at < n && a[at] === b[at]) at += 1;
+  return (
+    "first diff@" + at + ": bundle " +
+    JSON.stringify(a.slice(Math.max(0, at - 40), at + 60)) +
+    " vs module " +
+    JSON.stringify(b.slice(Math.max(0, at - 40), at + 60))
+  );
+}
+const ganttModuleAsInlined = ganttSource
+  .replace("export const COLORS =", "var COLORS =")
+  .replace(/export function /g, "function ")
+  .replace('function pad(value) {\n  return value < 10 ? "0" + value : String(value);\n}\n\n', "");
+const ganttInlined = extractRegion(clientSource, "gantt");
+ok(
+  "client.js inlines the whole gantt.js section verbatim",
+  ganttInlined.trim() === ganttModuleAsInlined.trim(),
+  "the inlined gantt region drifted from lib/client/gantt.js — edit the module and re-splice. " +
+    firstDiff(ganttInlined.trim(), ganttModuleAsInlined.trim()),
+);
+
 // ── 2. no colour may be pinned to one theme ───────────────────────────────────
 section("colours come from theme tokens, not literals");
 
@@ -122,17 +151,21 @@ function selectorAt(css, at) {
   return css.slice(prev + 1, open).trim();
 }
 
-// A hex here would be one theme's value applied to both. The single exception is
-// the label painted ON a saturated bar fill: a bar keeps its own colour in both
-// themes, so its label must keep the same contrast against it.
-const HEX_ALLOWED_SELECTORS = [".pmb-rlabel"];
+// A hex here would be one theme's value applied to both. There used to be a
+// single exception (".pmb-rlabel", a label painted on a saturated bar fill);
+// that rule is gone, so the whitelist is empty and NO hex survives at all.
+const HEX_ALLOWED_SELECTORS = [];
 const offenders = [];
 for (const match of CSS.matchAll(/#[0-9a-fA-F]{3,8}\b/g)) {
   const selector = selectorAt(CSS, match.index);
   if (HEX_ALLOWED_SELECTORS.includes(selector)) continue;
   offenders.push(match[0] + " in " + selector);
 }
-ok("no hex colour outside " + HEX_ALLOWED_SELECTORS.join("/"), offenders.length === 0, offenders.join(", "));
+ok(
+  HEX_ALLOWED_SELECTORS.length === 0 ? "no hex colour anywhere in the stylesheet" : "no hex colour outside " + HEX_ALLOWED_SELECTORS.join("/"),
+  offenders.length === 0,
+  offenders.join(", "),
+);
 
 // The two controls the report was about, and the ones an OS paints for us.
 ok("select carries an opaque token fill", /\.pmb-select\{[^}]*background:var\(--dsw-alias-bg-layer-3\)/.test(CSS));
@@ -261,7 +294,9 @@ ok("model options mirror the entry", fresh.modelOptions.length === 4 && fresh.mo
 const configured = resolveModelPicker(catalogFixture(ROUTE), ROUTE);
 ok("configured route keeps its provider", configured.provider === "deepseek-official", configured.provider);
 ok("configured route is not flagged", configured.savedMissing === false && configured.hint === "", configured.hint);
-ok("configured route has no empty row", !configured.providerOptions.some((option) => option.id === ""));
+// The empty row is permanent BY DESIGN: it is how a configured user clears the
+// route (the host accepts provider+model empty together — and only together).
+ok("the empty choice stays for a configured route (clearing must stay reachable)", configured.providerOptions.some((option) => option.id === ""));
 
 // A non-DeepSeek route must not be hijacked by the fallback.
 const kimi = resolveModelPicker(catalogFixture({ provider: "kimi-coding", model: "k3" }), { provider: "kimi-coding", model: "k3" });
@@ -297,12 +332,15 @@ ok("null catalog is survivable", beforeLoad.provider === "" && beforeLoad.models
 const unavailable = resolveModelPicker({ available: false, reason: "这个部署没有 llm 服务", providers: [] }, ROUTE);
 ok("no-llm catalog is survivable", unavailable.models.length === 0 && unavailable.provider === "deepseek-official");
 
-// The form must report the SAVED route's fate. `load()` corrects the draft, so a
-// notice derived from the draft stays silent about the very thing it exists for.
+// Each tier card must report ITS OWN saved route's fate. The card's open draft
+// has already been corrected onto a listed provider, so a notice derived from
+// the draft stays silent about the very thing it exists for — that THIS tier's
+// persisted provider is not in the catalog the host is serving.
 ok(
-  "notices resolve against the saved route, not the corrected draft",
-  /var savedPicker = resolveModelPicker\(catalog, catalog && catalog\.current \? catalog\.current : shown\);/.test(clientSource) &&
-    /open && savedPicker\.hint !== ""/.test(clientSource),
+  "notices resolve against the saved tier, not the corrected draft",
+  /var savedPicker = resolveModelPicker\(catalog, saved\);/.test(clientSource) &&
+    /savedPicker\.hint !== ""/.test(clientSource),
+  "one savedPicker per card, resolved on the persisted tier",
 );
 
 // The chart palette (`COLORS`) may paint fills, dots and accent borders — blocks
@@ -310,6 +348,153 @@ ok(
 // `color: COLORS.x` is how the settings page ended up with a 1.9:1 amber ⚠ line.
 const inkOffenders = [...clientSource.matchAll(/\bcolor\s*:\s*COLORS[\w.]*/g)].map((match) => match[0]);
 ok("no chart-palette value is used as ink", inkOffenders.length === 0, inkOffenders.join(", "));
+
+// ── 4. the expert tier manager: named routes over one catalog ─────────────
+// The expert model grew from ONE route into named tiers (default + front /
+// heavy / ...). The panel edits them all in one manager: the tiers array the
+// host sends alongside the catalog, one card per tier, and ONLY the tier
+// write actions — the legacy single-route write must not be called any more,
+// because two write paths for overlapping state is how the UI and the
+// dispatcher drift apart.
+section("the expert tier manager: named routes, one catalog");
+
+const tierCardSource = extractFunction(clientSource, "function renderTierCard(props)");
+
+ok(
+  "the container reads the tiers array the host sends with the catalog",
+  /setTiers\(Array\.isArray\(payload\.tiers\) \? payload\.tiers : \[\]\)/.test(clientSource),
+  "tiers travel on the same /__api__/models document",
+);
+ok(
+  "every tier in the response renders as its own card",
+  /tiers\.map\(function \(tier\) \{\s*return React\.createElement\(TierCard, \{/.test(clientSource),
+  "the list is data-driven — a tier the panel does not know about still shows",
+);
+ok(
+  "the default tier's name is fixed on its card (the bottom line is not renamable)",
+  /isDefault \? "default（底线）" : saved\.name/.test(tierCardSource),
+  "default is an id the dispatcher falls back to, not a label to edit",
+);
+ok(
+  "an unconfigured tier carries the 未配置 badge",
+  /saved\.configured !== true/.test(tierCardSource) && /"未配置"/.test(tierCardSource),
+  "a tier without a route would refuse dispatches that name it — say so on the card",
+);
+ok(
+  "the vision badge is the host's verdict, not a client guess",
+  /saved\.capabilities && saved\.capabilities\.vision === true/.test(tierCardSource) && /👁 带视觉/.test(tierCardSource),
+  "capabilities come from the model's own metadata via the host",
+);
+ok(
+  "tier saves go through set-expert-tier with name + route + note",
+  /action: "set-expert-tier",\s*name: name,\s*provider: picker\.provider,\s*model: shownModel,\s*reasoningEffort: shown\.reasoningEffort \|\| "",\s*note: shown\.note \|\| "",/.test(tierCardSource),
+  "the payload shape the host's setExpertTier validates",
+);
+ok(
+  "the panel never builds the legacy set-expert-model payload",
+  !clientSource.includes('action: "set-expert-model"'),
+  "the single-route write path is retired from the panel (the host still has it; the panel must not call it)",
+);
+ok(
+  "the delete button is rendered only for tiers that may be deleted",
+  /!isNew && !isDefault[\s\S]{0,400}?"删除档位"/.test(tierCardSource),
+  "default 是底线：没有删除钮，而不是一个置灰的删除钮",
+);
+ok(
+  "delete-expert-tier can never name default, even if the button fence is bypassed",
+  /if \(isDefault\) return;/.test(tierCardSource) && /action: "delete-expert-tier", name: saved\.name/.test(tierCardSource),
+  "two fences: the button is not rendered, and the handler refuses anyway",
+);
+
+// The new-tier name is validated BEFORE any request leaves the panel. The
+// validator is pure (same seam as resolveModelPicker), so drive it directly.
+const expertTierNameProblem = new Function(
+  "var TIER_NAME_RE = " + extractExpression(clientSource, "TIER_NAME_RE") + ";\n" +
+    extractFunction(clientSource, "function expertTierNameProblem(name)") +
+    "\nreturn expertTierNameProblem;",
+)();
+ok(
+  "legal tier names pass the pre-flight check",
+  ["default", "front", "heavy-2", "a"].every((name) => expertTierNameProblem(name) === ""),
+  ["default", "front", "heavy-2", "a"].map((name) => name + "→" + expertTierNameProblem(name)).join(" | "),
+);
+ok(
+  "illegal tier names are refused with a reason",
+  ["", "Front", "-x", "x y", "x_y", "前端", "a".repeat(32)].every((name) => expertTierNameProblem(name) !== ""),
+  "mirrors the host's isTierName: 小写字母/数字/连字符, 1-31 字符",
+);
+ok(
+  "the name check fires before the save request is built",
+  tierCardSource.indexOf("expertTierNameProblem(name)") > 0 &&
+    tierCardSource.indexOf("expertTierNameProblem(name)") < tierCardSource.indexOf('action: "set-expert-tier"'),
+  "an illegal name must produce a hint, not a 400 round trip",
+);
+ok(
+  "a new card cannot silently overwrite an existing tier (set-expert-tier upserts)",
+  /props\.existingNames/.test(tierCardSource) && /已有同名档位/.test(tierCardSource),
+  "renaming-onto is refused client-side; editing the tier's own card stays the honest path",
+);
+ok(
+  "every tier write re-reads the document it changed",
+  /function afterTierWrite\(message\) \{[\s\S]*?load\(\);/.test(clientSource),
+  "order, capabilities and configured flags only the host can re-issue",
+);
+ok(
+  "the 已保存 note comes from the host response",
+  /result && result\.note/.test(clientSource),
+  "the response's note field is shown verbatim, not paraphrased",
+);
+ok(
+  "the form still mounts on both surfaces (panel card + settings section)",
+  /mode: "panel"/.test(clientSource) &&
+    /React\.createElement\(ExpertModelForm, \{ view: null, mode: "settings", onSaved: refreshOpenBoard \}\)/.test(clientSource),
+  "one implementation, two surfaces — the settings one stays open from the start",
+);
+
+// maxDepth is global (one value on the legacy route), so it gets exactly ONE
+// editor — the default tier's card, whose save is the only one the host reads
+// the field from — and stays a read-only line everywhere else.
+ok(
+  "the default tier's save carries maxDepth (and only the default's)",
+  /maxDepth: isDefault \? shown\.maxDepth : undefined/.test(tierCardSource),
+  "the host writes maxDepth onto the legacy global route, only from name=default",
+);
+ok(
+  "the maxDepth select is editable on the default card only",
+  /isDefault\s*\?\s*tierSelectField\("maxDepth",/.test(tierCardSource),
+  "every other tier keeps the container's read-only line — one global value, one editor",
+);
+// Clearing ≠ deleting: default still has no 删除档位, but a configured default
+// can be written back to 未配置 — the host reads the empty pair as clear and
+// answers cleared:true. Dangerous enough to earn a confirm, honest enough to
+// say what the consequence is.
+ok(
+  "清空为未配置 renders on the configured default card only",
+  /!isNew && isDefault && saved\.configured === true[\s\S]{0,400}?"清空为未配置"/.test(tierCardSource),
+  "default 仍没有删除档位 —— 清空是另一颗钮，且只在有路由可清时出现",
+);
+ok(
+  "clearing the default tier is a confirmed empty-pair set-expert-tier write",
+  /window\.confirm\("清空后派发会被拒绝，直到重新配置/.test(tierCardSource) &&
+    /action: "set-expert-tier", name: "default", provider: "", model: ""/.test(tierCardSource),
+  "the host reads the empty pair as clear (cleared:true) — never as a delete",
+);
+ok(
+  "a cleared default is reported as cleared, not as saved",
+  /result\.cleared === true \? "已清空为未配置/.test(clientSource),
+  "清空和保存是两种结局，提示语不能共用一句",
+);
+// The effort vocabulary is per tier: the host resolves each configured tier's
+// own model (effortsByTier), a missing entry falls back to the default
+// route's list (which the container already fell back to the generic table).
+ok(
+  "the effort list prefers the tier's own effortsByTier entry, then the default route's",
+  /props\.effortsByTier\[saved\.name\]/.test(tierCardSource) &&
+    /Array\.isArray\(perTier\) && perTier\.length > 0 \? perTier : props\.efforts/.test(tierCardSource) &&
+    /setEffortsByTier\(/.test(clientSource) &&
+    /effortsByTier: effortsByTier/.test(clientSource),
+  "一个档的强度选项应该是它自己模型接受的强度，不是 default 模型的",
+);
 
 // ── 5. the 经验 tab: the one surface where a WRONG entry must be removable ────
 // The memory's whole value is that it outlives the session that wrote it, which
@@ -368,8 +553,8 @@ ok(
 );
 ok(
   "entering the tab is what fetches it (not every open)",
-  /if \(tab\.id === "memory" && store\.memory === null\) refreshMemory\(store\.sessionId\);/.test(clientSource),
-  "no other tab should pay that round trip",
+  /if \(tab\.id === "memory" && \(store\.memory === null \|\| store\.memorySessionId !== store\.sessionId\)\) refreshMemory\(store\.sessionId\);/.test(clientSource),
+  "no other tab should pay that round trip — and memory belonging to a session the reader left must re-fetch, not show",
 );
 
 // ── 6. a background poll must not announce itself ─────────────────────────────// The reported defect: the drawer polls the board every 1.5s, and every tick set
@@ -388,13 +573,23 @@ ok(
 ok(
   "refresh flags loading only when it has something to report",
   /var showLoading = !silent \|\| store\.data === null;/.test(refreshSource) &&
-    /setState\(showLoading \? \{ loading: true, error: null \} : \{\}\);/.test(refreshSource),
-  "the loading flag must not be set on a silent read that already has data on screen",
+    /if \(showLoading\) setState\(\{ loading: true, error: null \}\);/.test(refreshSource),
+  "the loading flag must not be set on a silent read that already has data on screen — and an empty patch must not re-render at all",
 );
 ok(
   "a failed silent poll keeps the last good board and stays quiet",
   /silent && store\.data !== null \? \{ loading: false, error: null \}/.test(refreshSource),
   "one failed read must not blank a readable panel",
+);
+ok(
+  "a stale response (session/window moved on) is dropped, not applied",
+  (refreshSource.match(/if \(target !== store\.sessionId \|\| windowTarget !== store\.windowMs\) return;/g) ?? []).length === 2,
+  "both the success and the failure landing must check — a slow answer to an old query used to overwrite the board on screen",
+);
+ok(
+  "an unchanged payload does not re-render the panel",
+  /store\.data !== null && store\.data\.updatedAt === data\.updatedAt && store\.data\.boardId === data\.boardId/.test(refreshSource),
+  "a poll that returns the same updatedAt+boardId carries nothing new",
 );
 
 const pollCalls = [...clientSource.matchAll(/refresh(?:Memory)?\([^;]*?\);/g)].map((match) => match[0]);
@@ -411,9 +606,9 @@ ok(
 );
 ok(
   "one slow poll cannot stack a second on top",
-  /if \(inflight\[query\] === true\) return Promise\.resolve\(\);/.test(refreshSource) &&
+  /if \(silent && inflight\[query\] === true\) return Promise\.resolve\(\);/.test(refreshSource) &&
     (refreshSource.match(/delete inflight\[query\];/g) ?? []).length === 2,
-  "both settle paths must clear the in-flight mark",
+  "polls dedup (the silent kind only — a reader-initiated read must always go out, it is what follows every manage write); both settle paths must clear the in-flight mark",
 );
 // The ⟳ button, the board picker and the window buttons keep the bare call —
 // a reader-initiated read SHOULD say it is working. What must stay explicit is
@@ -441,6 +636,30 @@ ok(
   "the poll interval is still the 1.5s live view",
   /setInterval\(function \(\) \{[\s\S]{0,200}?\}, 1500\);/.test(clientSource),
   "the Gantt is a live view; silence is the fix, not a slower poll",
+);
+
+// ── 7. a failed WRITE must not blank the board it failed against ─────────────
+// `manage()` used to report into `store.error` — the field the drawer treats as
+// "the board could not be read" and renders INSTEAD of the body. A rejected
+// note/release therefore hid the very board the operator was acting on. The
+// write error lives in `manageError` now, shown as a banner above the body.
+section("a failed write is a banner, not a blanked board");
+
+const manageSource = extractFunction(clientSource, "function manage(payload)");
+ok(
+  "manage reports failures into manageError",
+  /setState\(\{ busy: false, manageError: /.test(manageSource) && /setState\(\{ busy: true, manageError: null \}\)/.test(manageSource),
+  "store.error is the READ path's field; a write failure must not take the board down with it",
+);
+ok(
+  "manage never touches the read-path error field",
+  !/\berror:/.test(manageSource),
+  "a bare `error:` key in manage() would feed the full-screen branch",
+);
+ok(
+  "the banner renders beside the body, not instead of it",
+  /state\.manageError !== null/.test(clientSource) && /"❌ " \+ state\.manageError/.test(clientSource),
+  "the drawer must show the failure AND keep the board",
 );
 
 // ── summary ───────────────────────────────────────────────────────────────────

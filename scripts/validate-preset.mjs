@@ -277,6 +277,7 @@ const stubBoard = {
   subagents: undefined,
   memory: { __marker: "the-board's-memory-store" },
   expertModel: () => ({ provider: "", model: "", reasoningEffort: "", maxDepth: 2, configured: false }),
+  tiers: () => [{ name: "default", provider: "", model: "", reasoningEffort: "", note: "", capabilities: { vision: false }, configured: false }],
   delegateExpert: () => {
     throw new Error("not called");
   },
@@ -315,26 +316,24 @@ ok(
   registeredTools.some((tool) => tool.name === "pm_memory"),
   registeredTools.map((tool) => tool.name).join(","),
 );
+const presetSectionText =
+  typeof presetModule.PROMPT_SECTION === "function"
+    ? presetModule.PROMPT_SECTION("ROOT")
+    : String(presetModule.PROMPT_SECTION ?? "");
 ok(
-  "the row publishes exactly one prompt section carrying the memory doctrine",
+  "the row publishes exactly one prompt section carrying the memory pointer",
   promptSections === 1 &&
-    typeof presetModule.PROMPT_SECTION === "string" &&
-    presetModule.PROMPT_SECTION.includes("pm_memory") &&
-    presetModule.PROMPT_SECTION.includes("子专家完全无感知"),
-  "sections=" + String(promptSections) + " mentions=" + String(presetModule.PROMPT_SECTION.includes("pm_memory")),
+    presetSectionText.includes("pm_memory") &&
+    presetSectionText.includes("只由你"),
+  "sections=" + String(promptSections) + " mentions=" + String(presetSectionText.includes("pm_memory")),
 );
+// The WRITE GATE has exactly one authoritative home: the pm_memory tool
+// description (scripts/check-tools.mjs asserts it there). The preset section
+// carries only the pointer, so the two can never drift apart.
 ok(
-  "the preset doctrine states the WRITE GATE, not just the tool name",
-  typeof presetModule.PROMPT_SECTION === "string" &&
-    presetModule.PROMPT_SECTION.includes("有别于常识") &&
-    presetModule.PROMPT_SECTION.includes("靠常识会做错") &&
-    presetModule.PROMPT_SECTION.includes("不要写"),
-  "the doctrine is what keeps the store from filling with the obvious",
-);
-ok(
-  "the preset doctrine says a stale entry must be deleted",
-  typeof presetModule.PROMPT_SECTION === "string" && presetModule.PROMPT_SECTION.includes("forget"),
-  "a memory nobody prunes misleads every later session",
+  "the preset doctrine points at recall-before-dispatch and forget",
+  presetSectionText.includes("recall") && presetSectionText.includes("forget"),
+  "the pointer keeps the discipline visible without duplicating the gate",
 );
 
 // The host half must publish NO tool. That row is mounted by the profile, so its

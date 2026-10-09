@@ -20,7 +20,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { BoardStore, resolveExpertModelCatalog } from "dsh-pm-mode/store";
+import { BoardStore, resolveExpertModelCatalog, expertTiersOf, isTierName, isRouteConfigured } from "dsh-pm-mode/store";
 import { createPanelRouter, EXPERT_MODEL_SAVED_NOTE } from "dsh-pm-mode/routes";
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "pmb-routes-"));
@@ -48,6 +48,7 @@ const llm = {
       provider,
       id: model,
       name: model.toUpperCase(),
+      inputModalities: model === "model-vision" ? ["text", "image"] : ["text"],
       reasoning: { efforts: model === "model-y" ? [{ id: "high" }, { id: "medium" }] : [{ id: "max" }, { id: "high" }] },
     };
   },
@@ -57,6 +58,76 @@ const settings = {
   settings: () => store.settings(),
   expertModel: () => current,
   catalog: () => resolveExpertModelCatalog(llm, current),
+  // Mirrors the production surface in lib/index.js: the tier list derives from
+  // the settings document (default = expertTiers.default ?? expertModel), and
+  // tier writes validate against the adapter and DERIVE capabilities from its
+  // advertised modalities.
+  tiers: () => expertTiersOf(store.settings()),
+  setExpertTier: async (input, actor) => {
+    const name = String(input?.name ?? "").trim();
+    if (!isTierName(name)) throw new Error("档位名必须是小写字母/数字/连字符（1-31 字符），例如 default / front / heavy");
+    const wanted = {
+      provider: String(input?.provider ?? "").trim(),
+      model: String(input?.model ?? "").trim(),
+      reasoningEffort: String(input?.reasoningEffort ?? "").trim(),
+      note: String(input?.note ?? "").trim(),
+    };
+    const before = store.settings();
+    // Mirrors production: an EMPTY route clears the default (and only the
+    // default); a named tier with no route is refused.
+    if (!isRouteConfigured(wanted)) {
+      if (name !== "default") throw new Error(`档位「${name}」需要服务商和模型；想撤掉这档用删除档位`);
+      const tiers = { ...before.expertTiers };
+      delete tiers.default;
+      const saved = store.saveSettings({
+        expertTiers: tiers,
+        expertModel: { provider: "", model: "", reasoningEffort: "", maxDepth: before.expertModel.maxDepth, updatedAt: Date.now(), updatedBy: String(actor ?? "") },
+      });
+      current = { ...current, provider: "", model: "", reasoningEffort: "" };
+      return { settings: saved, resolved: null, cleared: true };
+    }
+    let info;
+    try {
+      info = await llm.resolveModelInfo(wanted.provider, wanted.model);
+    } catch (error) {
+      throw new Error(`模型路由 ${wanted.provider}/${wanted.model} 无法解析：` + String(error && error.message ? error.message : error));
+    }
+    const efforts = info.reasoning.efforts.map((effort) => effort.id);
+    if (wanted.reasoningEffort !== "" && !efforts.includes(wanted.reasoningEffort)) {
+      throw new Error(`模型 ${wanted.provider}/${wanted.model} 不支持 reasoning effort "${wanted.reasoningEffort}"；可选：${efforts.join(", ")}`);
+    }
+    const capabilities = { vision: (info.inputModalities ?? []).includes("image") };
+    const tiers = { ...store.settings().expertTiers };
+    tiers[name] = { ...wanted, capabilities, updatedAt: Date.now(), updatedBy: String(actor ?? "") };
+    const patch = { expertTiers: tiers };
+    if (name === "default" && input?.maxDepth !== undefined) {
+      const depth = Number(input.maxDepth);
+      if (!Number.isSafeInteger(depth) || depth < 1 || depth > 5) throw new Error("maxDepth 必须是 1-5 的整数");
+      patch.expertModel = { ...before.expertModel, maxDepth: depth };
+    }
+    const saved = store.saveSettings(patch);
+    return { settings: saved, resolved: { id: info.id, name: info.name, provider: info.provider }, capabilities };
+  },
+  // Mirrors production: each configured tier's effort list comes from ITS model.
+  tierEfforts: async () => {
+    const out = {};
+    for (const tier of expertTiersOf(store.settings())) {
+      if (!tier.configured) continue;
+      try {
+        const info = await llm.resolveModelInfo(tier.provider, tier.model);
+        out[tier.name] = (info.reasoning?.efforts ?? []).map((effort) => effort.id);
+      } catch { /* omitted */ }
+    }
+    return out;
+  },
+  deleteExpertTier: async (name) => {
+    const wanted = String(name ?? "").trim();
+    if (wanted === "default") throw new Error("default 档不能删（它是专家路由的底线）；清空它用专家模型表单的「未配置」");
+    const tiers = { ...store.settings().expertTiers };
+    if (tiers[wanted] === undefined) throw new Error(`没有这个档位: ${wanted}`);
+    delete tiers[wanted];
+    return { settings: store.saveSettings({ expertTiers: tiers }) };
+  },
   setExpertModel: async (patch) => {
     // Mirrors the production order and wording in lib/index.js: route
     // resolution (wrapped as 无法解析), then effort membership. Depth is
@@ -237,6 +308,75 @@ const cleared = await call("POST", "/__api__/manage", {
 check("clearing the route is accepted", cleared.status === 200, cleared.body);
 check("the cleared route reads back as unconfigured", current.provider === "" && store.settings().expertModel.model === "", JSON.stringify(current));
 
+// 6d. named expert tiers: upsert validates against the adapter, capabilities
+// are DERIVED from the model's advertised modalities, and the catalog endpoint
+// carries the tier list for the panel's editor.
+const tierSaved = await call("POST", "/__api__/manage", {
+  action: "set-expert-tier",
+  name: "front",
+  provider: "vendor-a",
+  model: "model-vision",
+  reasoningEffort: "",
+  note: "前端/视觉验证",
+});
+const tierBody = JSON.parse(tierSaved.body);
+check("a valid tier is saved", tierSaved.status === 200 && tierBody.ok === true, tierSaved.body);
+check("the vision capability is derived from the model's modalities, not asked for", tierBody.capabilities && tierBody.capabilities.vision === true, tierSaved.body);
+const tierListBody = JSON.parse((await call("GET", "/__api__/models")).body);
+check(
+  "the models endpoint carries the tier list for the panel",
+  Array.isArray(tierListBody.tiers) && tierListBody.tiers.some((tier) => tier.name === "front" && tier.capabilities.vision === true),
+  JSON.stringify(tierListBody.tiers),
+);
+check("the default tier is the legacy single route (unconfigured here)", tierListBody.tiers[0].name === "default" && tierListBody.tiers[0].configured === false, JSON.stringify(tierListBody.tiers[0]));
+
+const badTier = await call("POST", "/__api__/manage", {
+  action: "set-expert-tier",
+  name: "heavy",
+  provider: "vendor-a",
+  model: "does-not-exist",
+  reasoningEffort: "",
+});
+check("a tier route the adapter cannot resolve is refused", badTier.status === 400 && badTier.body.includes("无法解析"), badTier.body);
+
+const emptyTier = await call("POST", "/__api__/manage", { action: "set-expert-tier", name: "heavy", provider: "", model: "" });
+check("a tier with no route is refused (clearing is delete's job)", emptyTier.status === 400, emptyTier.body);
+
+const badTierName = await call("POST", "/__api__/manage", { action: "set-expert-tier", name: "坏 名字!", provider: "vendor-a", model: "model-x" });
+check("a non-slug tier name is refused", badTierName.status === 400, badTierName.body);
+
+const deleteDefault = await call("POST", "/__api__/manage", { action: "delete-expert-tier", name: "default" });
+check("the default tier cannot be deleted", deleteDefault.status === 400 && deleteDefault.body.includes("default"), deleteDefault.body);
+const deleted = await call("POST", "/__api__/manage", { action: "delete-expert-tier", name: "front" });
+check("a named tier can be deleted", deleted.status === 200 && JSON.parse((await call("GET", "/__api__/models")).body).tiers.every((tier) => tier.name !== "front"), deleted.body);
+
+// 6e. default-tier specifics: maxDepth rides the default card, and an empty
+// route CLEARS the default (the panel's only path back to 未配置).
+const depthSaved = await call("POST", "/__api__/manage", {
+  action: "set-expert-tier",
+  name: "default",
+  provider: "vendor-b",
+  model: "model-z",
+  reasoningEffort: "",
+  maxDepth: 4,
+});
+check("the default card carries the global maxDepth", depthSaved.status === 200 && store.settings().expertModel.maxDepth === 4, depthSaved.body);
+const withEfforts = JSON.parse((await call("GET", "/__api__/models")).body);
+check(
+  "the models endpoint hands each configured tier its own effort vocabulary",
+  withEfforts.effortsByTier && withEfforts.effortsByTier.default && withEfforts.effortsByTier.default.join(",") === "max,high",
+  JSON.stringify(withEfforts.effortsByTier),
+);
+const clearDefault = await call("POST", "/__api__/manage", { action: "set-expert-tier", name: "default", provider: "", model: "" });
+const afterClear = store.settings();
+check(
+  "an empty default route clears the default tier (panel's path back to 未配置)",
+  clearDefault.status === 200 && JSON.parse(clearDefault.body).cleared === true && afterClear.expertTiers.default === undefined && afterClear.expertModel.model === "",
+  clearDefault.body,
+);
+const stillEmpty = await call("POST", "/__api__/manage", { action: "set-expert-tier", name: "heavy", provider: "", model: "" });
+check("a non-default tier with no route is still refused", stillEmpty.status === 400, stillEmpty.body);
+
 // 7. a LAN reader may read but not write
 const lanRead = await call("GET", "/__api__/models", undefined, "192.168.1.20");
 check("a LAN reader can read the catalog", lanRead.status === 200, lanRead.status);
@@ -331,6 +471,14 @@ const noProject = await call("POST", "/__api__/manage", { action: "memory-rememb
 check("a write with no project is refused with a reason, not stored nowhere", noProject.status === 400, noProject.body);
 const badId = await call("POST", "/__api__/manage", { action: "memory-forget", project: PROJECT, id: "m-nope" });
 check("deleting an unknown id is refused with the way out", badId.status === 400 && badId.body.includes("list"), badId.body);
+
+// Skew honesty: a newer client calling an action this host predates must hear
+// "未知 action", not the board lookup's "找不到看板" — that misdirection cost a
+// debugging round once (the tier editor against a pre-tier host).
+const nonsenseAction = await call("POST", "/__api__/manage", { action: "totally-made-up" });
+check("an unknown action with no boardId says 未知 action, not 找不到看板", nonsenseAction.status === 400 && nonsenseAction.body.includes("未知 action") && !nonsenseAction.body.includes("找不到看板"), nonsenseAction.body);
+const knownNoBoard = await call("POST", "/__api__/manage", { action: "set-expert-tier", note: "no boardId at all" });
+check("a known non-board action never answers 找不到看板 either", knownNoBoard.status === 400 && !knownNoBoard.body.includes("找不到看板"), knownNoBoard.body);
 
 const failed = results.filter((item) => !item.pass);
 console.log("\n" + (results.length - failed.length) + "/" + results.length + " route checks passed");

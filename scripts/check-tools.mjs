@@ -86,8 +86,12 @@ console.log("toolset: " + toolset.map((tool) => tool.name).join(", "));
 // decides, so a test that asserts on `kimi-coding/k3` would re-introduce the
 // coupling the setting removes.
 const EXPERT_TEST_ROUTE = { provider: "vendor-a", model: "model-x", reasoningEffort: "max", maxDepth: 2 };
+const EXPERT_TEST_TIERS = [
+  { name: "default", provider: "vendor-a", model: "model-x", reasoningEffort: "max", note: "标准专家", capabilities: { vision: false }, configured: true },
+  { name: "front", provider: "vendor-a", model: "model-vision", reasoningEffort: "", note: "前端/视觉验证", capabilities: { vision: true }, configured: true },
+];
 const expertTool = createExpertTool({
-  route: () => EXPERT_TEST_ROUTE,
+  tiers: () => EXPERT_TEST_TIERS,
   delegate: async () => ({ kind: "continuable", subagentId: "child-1" }),
   describe: (route) => route.provider + "/" + route.model,
 });
@@ -296,8 +300,26 @@ ok(
   expertSchema !== undefined && expertSchema.description.includes("vendor-a/model-x"),
   expertSchema === undefined ? "missing" : expertSchema.description.slice(0, 140),
 );
+ok(
+  "its description lists the tiers with notes and the vision badge",
+  expertSchema !== undefined &&
+    expertSchema.description.includes("default=") &&
+    expertSchema.description.includes("front=") &&
+    expertSchema.description.includes("带视觉"),
+  expertSchema === undefined ? "missing" : expertSchema.description.slice(0, 220),
+);
+ok(
+  "the tier picker is by NAME and needs is a hard-gate enum (no raw model parameter)",
+  expertSchema !== undefined &&
+    expertSchema.parameters.properties.tier !== undefined &&
+    expertSchema.parameters.properties.needs !== undefined &&
+    Array.isArray(expertSchema.parameters.properties.needs.items?.enum) &&
+    expertSchema.parameters.properties.needs.items.enum.includes("vision") &&
+    expertSchema.parameters.properties.provider === undefined,
+  expertSchema === undefined ? "missing" : Object.keys(expertSchema.parameters.properties).join(","),
+);
 const unconfiguredSchema = createExpertTool({
-  route: () => ({ provider: "", model: "", reasoningEffort: "", maxDepth: 2 }),
+  tiers: () => [{ name: "default", provider: "", model: "", reasoningEffort: "", note: "", capabilities: { vision: false }, configured: false }],
   delegate: async () => ({ kind: "continuable", subagentId: "x" }),
 });
 ok(

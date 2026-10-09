@@ -395,7 +395,19 @@ ok(
 );
 
 const delegated = [];
-const makeDelegate = (activeRoute) =>
+// The delegate reads a TIER LIST now; a bare route object is the default tier.
+const toTiers = (activeRoute) => [
+  {
+    name: "default",
+    provider: activeRoute.provider,
+    model: activeRoute.model,
+    reasoningEffort: activeRoute.reasoningEffort ?? "",
+    note: activeRoute.note ?? "",
+    capabilities: { vision: activeRoute.vision === true },
+    configured: activeRoute.provider !== "" && activeRoute.model !== "",
+  },
+];
+const makeTieredDelegate = (tierListOrFn, depthFn = () => 2) =>
   createExpertDelegate({
     subagents: () => ({
       getProvider: () => ({ name: "spawn", capabilities: { agentOptions: true, depthLimit: true } }),
@@ -404,8 +416,13 @@ const makeDelegate = (activeRoute) =>
         return { childId: "child-1", messageId: "msg-1" };
       },
     }),
-    route: () => activeRoute,
+    // Accept a live function: a settings change must be visible to the NEXT
+    // delegation without rebuilding anything (the route mutation test below
+    // is exactly that guarantee).
+    tiers: typeof tierListOrFn === "function" ? tierListOrFn : () => tierListOrFn,
+    maxDepth: depthFn,
   });
+const makeDelegate = (activeRoute) => makeTieredDelegate(() => toTiers(activeRoute), () => activeRoute.maxDepth ?? 2);
 let unconfiguredRefusal = "";
 try {
   await makeDelegate({ provider: "", model: "", reasoningEffort: "", maxDepth: 2 })(
@@ -462,10 +479,100 @@ try {
 }
 ok("a delegation with no caller signal still starts", noSignalError === "", noSignalError || "(started)");
 
-const tool = createExpertTool({ route: () => route, delegate, describe: describeExpertRoute });
+// The post-dispatch recall reminder: the output names how many entries the
+// caller's project holds, so "recall and top up the task book" is suggested at
+// the moment it is still cheap. Helpers are excluded (they report to their
+// expert, and memory is the dispatcher's business).
+section("recall reminder after dispatch");
+{
+  const sandboxHome = fs.mkdtempSync(path.join(os.homedir(), ".pmb-hint-fixture-"));
+  fs.mkdirSync(path.join(sandboxHome, ".git"), { recursive: true });
+  const previousDshHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = root;
+  const hintIdentity = store.memory.resolveIdentity(sandboxHome);
+  store.memory.remember(hintIdentity, { title: "测试经验", text: "报成功却没干活的命令：xx --apply" });
+  const hintTool = createExpertTool({ tiers: () => toTiers(route), delegate, describe: describeExpertRoute, memory: store.memory });
+  const hintExec = { agent: { id: "s-hint", session: { header: { cwd: sandboxHome } } }, signal: new AbortController().signal };
+  const hinted = await hintTool.execute({ description: "d", prompt: "p" }, hintExec);
+  ok("a dispatch reports the project's memory size", hinted.memoryTotal === 1, JSON.stringify(hinted));
+  const hintRender = hintTool.output.render({}, hinted).map((block) => block.text).join("\n");
+  ok("the render reminds to recall and top up", hintRender.includes("本项目记忆库有 1 条经验") && hintRender.includes("pm_memory action=recall"), hintRender);
+  const helperRun = await hintTool.execute({ description: "d", prompt: "p", role: "helper" }, hintExec);
+  ok("a helper-tier dispatch gets NO memory reminder", helperRun.memoryTotal === 0, JSON.stringify(helperRun));
+  if (previousDshHome === undefined) delete process.env.DSH_HOME;
+  else process.env.DSH_HOME = previousDshHome;
+  fs.rmSync(sandboxHome, { recursive: true, force: true });
+}
+
+// The closure prompt: reaching done/failed asks what the line taught.
+section("closure prompt on terminal status");
+{
+  await byName.pm_task.execute({ action: "create", id: "t-closure-1", title: "结项提示检查" }, execFor(SESSION));
+  const doneOut = await byName.pm_task.execute({ action: "update", id: "t-closure-1", status: "done" }, execFor(SESSION));
+  ok("a done update asks what the line taught", doneOut.includes("🧠") && doneOut.includes("pm_memory action=remember"), doneOut);
+  await byName.pm_task.execute({ action: "create", id: "t-closure-2", title: "取消不提示" }, execFor(SESSION));
+  const cancelOut = await byName.pm_task.execute({ action: "update", id: "t-closure-2", status: "cancelled" }, execFor(SESSION));
+  ok("a cancelled update does NOT nag about memory", !cancelOut.includes("🧠"), cancelOut);
+}
+// Tiers and hard needs: the dispatcher picks a tier by name (or just declares
+// needs); a mismatch refuses, an implicit default escalates transparently.
+section("tier and needs routing");
+{
+  const tiered = [
+    { name: "default", provider: "vendor-a", model: "model-x", reasoningEffort: "", note: "标准", capabilities: { vision: false }, configured: true },
+    { name: "front", provider: "vendor-a", model: "model-vision", reasoningEffort: "", note: "前端/视觉", capabilities: { vision: true }, configured: true },
+  ];
+  const tieredDelegate = makeTieredDelegate(tiered);
+  const exec = { agent: { id: "dispatcher-session" }, signal: new AbortController().signal };
+
+  const explicit = await tieredDelegate({ description: "d", prompt: "p", persona: EXPERT_PERSONA, tier: "front" }, exec);
+  ok("an explicit tier is honored", explicit.tier === "front" && delegated.at(-1).request.agentOptions.model === "model-vision", JSON.stringify(explicit));
+
+  const defaulted = await tieredDelegate({ description: "d", prompt: "p", persona: EXPERT_PERSONA }, exec);
+  ok("an omitted tier is the default tier", defaulted.tier === "default" && delegated.at(-1).request.agentOptions.model === "model-x", JSON.stringify(defaulted));
+
+  let unknownTier = "";
+  try { await tieredDelegate({ description: "d", prompt: "p", persona: EXPERT_PERSONA, tier: "nope" }, exec); } catch (error) { unknownTier = String(error.message); }
+  ok("an unknown tier is refused with the valid list", unknownTier.includes("没有档位") && unknownTier.includes("front"), unknownTier || "(no error)");
+
+  const escalated = await tieredDelegate({ description: "d", prompt: "p", persona: EXPERT_PERSONA, needs: ["vision"] }, exec);
+  ok("needs=[vision] on a blind default escalates to the vision tier", escalated.tier === "front" && escalated.escalated === true, JSON.stringify(escalated));
+
+  let explicitMismatch = "";
+  try { await tieredDelegate({ description: "d", prompt: "p", persona: EXPERT_PERSONA, tier: "default", needs: ["vision"] }, exec); } catch (error) { explicitMismatch = String(error.message); }
+  ok("an explicit blind tier + needs is refused with the satisfying tiers", explicitMismatch.includes("不具备") && explicitMismatch.includes("front"), explicitMismatch || "(no error)");
+
+  const blindOnly = makeTieredDelegate([tiered[0]]);
+  let noCapable = "";
+  try { await blindOnly({ description: "d", prompt: "p", persona: EXPERT_PERSONA, needs: ["vision"] }, exec); } catch (error) { noCapable = String(error.message); }
+  ok("needs nobody satisfies is refused with the way out", noCapable.includes("不具备") && noCapable.includes("专家模型"), noCapable || "(no error)");
+
+  let unknownNeed = "";
+  try { await tieredDelegate({ description: "d", prompt: "p", persona: EXPERT_PERSONA, needs: ["smart"] }, exec); } catch (error) { unknownNeed = String(error.message); }
+  ok("an unknown need is refused (needs stays a hard-gate vocabulary)", unknownNeed.includes("未知 needs"), unknownNeed || "(no error)");
+
+  // The dispatch is recorded on the caller's board (tier + route), so the
+  // panel can later answer "which tier did this expert run on".
+  const recordTool = createExpertTool({ tiers: () => tiered, delegate: tieredDelegate, describe: describeExpertRoute, store });
+  const recordResult = await recordTool.execute({ description: "视觉验证", prompt: "p", tier: "front" }, { agent: { id: SESSION, session: { header: {} } }, signal: new AbortController().signal });
+  const dispatchEvent = board.timeline.filter((event) => event.kind === "agent-dispatch").at(-1);
+  ok("the delegation lands on the board as an agent-dispatch event", dispatchEvent !== undefined && dispatchEvent.detail.includes("档位 front"), JSON.stringify(dispatchEvent));
+  const tierRender = recordTool.output.render({}, explicit).map((block) => block.text).join("\n");
+  ok("the render names the tier and route", tierRender.includes("档位：front") && tierRender.includes("model-vision"), tierRender);
+  // The runtime validates the tool's returned value against the declared
+  // output schema with additionalProperties:false — a delegate field missing
+  // from that schema rejects the call AFTER the child already started, and the
+  // dispatcher's retry then spawns a duplicate expert (shipped once, 2026-10-08).
+  const declaredKeys = new Set(Object.keys(recordTool.output.schema.properties));
+  const leaked = Object.keys(recordResult).filter((key) => !declaredKeys.has(key));
+  ok("every field the tool returns is declared in its output schema", leaked.length === 0, "undeclared: " + leaked.join(","));
+}
+
+
+const tool = createExpertTool({ tiers: () => toTiers(route), delegate, describe: describeExpertRoute });
 ok("the expert tool is named subagent_expert (no model in the name)", tool.name === "subagent_expert", tool.name);
 const unconfiguredTool = createExpertTool({
-  route: () => ({ provider: "", model: "", reasoningEffort: "", maxDepth: 2 }),
+  tiers: () => toTiers({ provider: "", model: "", reasoningEffort: "" }),
   delegate,
   describe: describeExpertRoute,
 });
@@ -476,7 +583,7 @@ ok(
 );
 let missingRegistry = "";
 try {
-  await createExpertDelegate({ subagents: () => undefined, route: () => route })(
+  await createExpertDelegate({ subagents: () => undefined, tiers: () => toTiers(route), maxDepth: () => 2 })(
     { description: "x", prompt: "y", persona: EXPERT_PERSONA },
     { agent: { id: "s" }, signal: new AbortController().signal },
   );
@@ -488,7 +595,8 @@ let noAgentOptions = "";
 try {
   await createExpertDelegate({
     subagents: () => ({ getProvider: () => ({ name: "spawn", capabilities: { agentOptions: false, depthLimit: true } }) }),
-    route: () => route,
+    tiers: () => toTiers(route),
+    maxDepth: () => 2,
   })({ description: "x", prompt: "y", persona: EXPERT_PERSONA }, { agent: { id: "s" }, signal: new AbortController().signal });
 } catch (error) {
   noAgentOptions = String(error.message);
@@ -497,7 +605,7 @@ ok("a provider that cannot route children fails loudly", noAgentOptions.includes
 
 section("metrics");
 const metrics = store.metrics(board, {});
-ok("metrics counts the finished task", metrics.done === 1, JSON.stringify(metrics.done));
+ok("metrics counts the finished tasks (the demo task plus the closure probe)", metrics.done === 2, JSON.stringify(metrics.done));
 ok("metrics rolls phases up", metrics.byPhase.some((item) => item.name === "实现" && item.ms > 0), JSON.stringify(metrics.byPhase));
 ok("metrics rolls tool cost up", metrics.tools.some((item) => item.tool === "executeLua" && item.ms === 60000), JSON.stringify(metrics.tools));
 ok("metrics buckets the last 24 hours", metrics.timelineByHour.length === 24 && metrics.timelineByHour.some((n) => n > 0));

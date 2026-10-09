@@ -84,12 +84,12 @@ Three consequences, all intended:
 Because a delegated child joins its parent's standing composition, every expert
 (and every helper an expert starts) gets the same toolset. That is intended:
 an expert records its internal split as child tasks on the dispatcher's board by
-passing the `boardId` it was given, so the split shows up in the panel instead
-of becoming a black box.
+passing the `boardId` the delegation auto-appended to its task book, so the split
+shows up in the panel instead of becoming a black box.
 
 The `pm` agent preset's composition is snapshotted under `preset/` in this repo —
-see `preset/README.md` for why, and for the `scripts/sync-preset.mjs` check that
-keeps the snapshot honest.
+see `preset/README.md` for why, and `scripts/build-preset-patch.mjs --check` for
+the check that keeps the generated patch in step with it.
 
 ## Surfaces
 
@@ -97,7 +97,7 @@ keeps the snapshot honest.
 | --- | --- |
 | Session-header button | `📋 项目看板 (n) ⛔m` — active task count and blocked count, opening the drawer. |
 | Gantt tab | One lane per task (with its 🧭 domain), one row per agent, bars = measured execution spans (window: 1 h / 6 h / 24 h). Segments inside a bar are individual tool calls, so a long bar reads as *what it spent the time on*. Unbound agents land in a 未归属 swimlane rather than disappearing. |
-| Experts tab | One card per **domain**: its name and id, its owning expert (or a loud 无人负责), the expert's live status and delivered count, the routing keywords, and which tasks it has handled — plus the environment leases and who holds them. This is the tab that answers "who already has the context for this?" |
+| Experts tab | One card per **domain**: its name and id, its owning expert (or a loud 无人负责), the expert's live status and delivered count, the responsibility prose the dispatcher judges by, and which tasks it has handled — plus the environment leases and who holds them. This is the tab that answers "who already has the context for this?" |
 | Tasks tab | Kanban cards grouped by 进行中 / 需要关注 / 未开始 / 已结束, each carrying its domain chip, the user's original request, its parent line when it is an expert's internal split, phase chips with their own durations, bound agents with live status, the transition log, and 加备注 / 移除. |
 | Resources tab | Exclusive leases: holder + hold time + wait queue, with 强制释放 and 转交队首 for the paths that need a human. |
 | 经验 tab | The project's **cross-session experience memory**: every entry with its kind, tags, evidence and hit count, a filter over them, and 改正 / 删除 on each card. The agent writes them with `pm_memory`; this is where a human reads them and removes a mis-remembered one. |
@@ -132,6 +132,14 @@ the store, and no `pm_memory` entry is copied into a task book automatically. Th
 dispatcher recalls what it wants and decides whether a briefing should carry it.
 A subagent that never sees the store cannot be misled by a stale entry, and the
 store keeps exactly one reader whose queries are visible in the session log.
+
+Two nudges keep that discipline attached to the moments it matters, rather than
+to goodwill alone: a `subagent_expert` result reports how many entries the
+project holds (so "recall and top up the running expert's task book" is
+suggested while it is still cheap), and a task reaching `done` / `failed` asks
+whether the line taught anything worth recording. Both are read-only hints —
+`view`, never `recall` — so they do not inflate the hit counts that drive
+pruning, and neither can fail the action it rides on.
 
 **A wrong entry must be cheap to remove.** A memory that outlives its session also
 outlives its truth. So `forget` exists, the panel puts 删除 on every card, and an
@@ -178,7 +186,10 @@ Two rules keep that generous list from becoming a liability:
 The files are plain JSON under `$DSH_HOME/pm-mode/memory/` — `index.json` for the
 registry, one document per project — written atomically and read on every call, so
 a human can open, edit, or delete one in an editor and the panel stays a thin
-layer over the same bytes rather than a second source of truth.
+layer over the same bytes rather than a second source of truth. A `recall`'s hit
+counts are the one exception to "a read is just a read": they accumulate in memory
+and ride along on the next write, because rewriting a several-hundred-KB document
+to bump a counter made every orientation search a disk write.
 
 ### The drawer follows the conversation on screen
 
@@ -217,7 +228,15 @@ Three sources, and the doctrine treats all of them as load-bearing:
   `tool/result` pairs. This is what makes "what is running now" and "how long
   did that step take" facts rather than self-reports. A 5-second reconciliation
   poll over `agents.list()` heals any gap, including an agent that started
-  before the plugin mounted.
+  before the plugin mounted, and the same poll asks the subagent registry for
+  each board-owning session's exact children — so a child is attributed to its
+  true parent's board even when two dispatchers are active at once (the "last
+  running agent" guess now fires only when exactly one candidate exists).
+  The dispatcher's own tool calls are NOT recorded: they are scheduling
+  overhead, and on one real 20-day board they were 41% of the timeline. "Busy"
+  and cumulative runtime come from a per-agent rollup maintained as events
+  arrive (`board.activity`), so they stay correct when the capped timeline
+  starts dropping old events.
 - **Written by the dispatcher and by experts through the tools**: domains and
   their owning experts, tasks (with the user's original request), statuses,
   phases, agent bindings, leases, evidence. None of this is inferable, so the
@@ -319,8 +338,8 @@ exactly how `@deepseek-ai/dsh-web-app` ships `presets/*.patch.yml`. The
 picker showed no `pm` mode even with the plugin row active and the host half
 working.
 
-`presets/pm.patch.yml` is GENERATED from `preset/agent.cordis.yml` (the
-snapshot `scripts/sync-preset.mjs` keeps in step with the old live copy):
+`presets/pm.patch.yml` is GENERATED from `preset/agent.cordis.yml`
+(`scripts/build-preset-patch.mjs --check` fails when they drift):
 
 ```sh
 node scripts/build-preset-patch.mjs          # regenerate
@@ -373,11 +392,11 @@ reinstalling the bundle leaves every existing board and memory entry in place.
 
 | Tool | Actions |
 | --- | --- |
-| `pm_mode` | `summary`, `tasks`, `experts`, `timeline`, `agents`, `resources`, `define-resource`, `grant`, `revoke`, `note` |
+| `pm_mode` | `summary`, `tasks`, `experts`, `timeline`, `agents`, `resources`, `define-resource`, `grant`, `revoke`, `note`, `prune` |
 | `pm_task` | `create`, `update`, `phase`, `link`, `list` |
 | `pm_agent` | `list`, `recommend`, `domain`, `bind`, `unbind`, `ctx` |
 | `pm_memory` | `remember`, `recall`, `list`, `update`, `forget` |
-| `subagent_expert` | no actions — one call dispatches one expert (see below) |
+| `subagent_expert` | no actions — one call dispatches one expert (`role:"helper"` when an expert spawns its own assistant, which gets the executor persona instead); optional `tier` (a named route from settings, `default` otherwise) and `needs:["vision"]` (a hard capability gate — a tier without it refuses, naming the tiers that have it); the dispatcher's boardId is auto-appended to the task book, and the result reports the project's memory size as a recall reminder |
 
 The three board actions that carry the model:
 
@@ -408,6 +427,35 @@ route now lives in the plugin's own settings document
 carries the same form — one component, both surfaces — so the setting is also
 where someone already reading the board reaches for it, and the **资源** tab
 keeps it beside the leases.
+
+**The dispatcher picks a TIER, never a model.** One route is the common case;
+a deployment that wants per-task choice defines *named tiers* — `default`,
+`front`, `heavy`, each a validated route plus a one-line prose note written by
+the operator ("前端/视觉验证", "疑难问题才用，贵"). The dispatcher's tool
+description lists those notes, so it judges **the task's weight** (which it can
+read from the request) rather than **model ids** (which a fast model cannot
+judge). `tier` omitted is always `default`; doctrine says to reach for another
+tier only when the task is obviously over- or under-weight.
+
+**`needs` is a hard gate, not a preference.** Some tasks cannot run at all
+without a capability — a text-only model cannot verify a UI screenshot. So
+`needs:["vision"]` is checked mechanically at dispatch: an explicit tier that
+lacks it is refused with the satisfying tiers named; an implicit default that
+lacks it escalates to the first configured tier that has it (and the output
+says so). A refusal beats a silent downgrade, which fails twenty minutes later
+as a bad deliverable instead of at the call. A tier's `vision` flag is DERIVED
+from the model's advertised `inputModalities` at save time — never an operator
+checkbox, because the adapter's answer is the one the runtime honors. The needs
+vocabulary stays deliberately tiny: only "missing it fails the task" belongs
+there; "it would be nicer" is what tiers are for.
+
+Every delegation records its tier and route on the caller's board
+(`agent-dispatch` event), so the panel can later answer "which tier did this
+expert run on" — without that record, tier choice is unaccountable.
+
+The legacy single route (`expertModel`) IS the default tier when the tier map
+has no `default` entry, so a settings file from before tiers keeps working
+untouched.
 
 > Placement is not cosmetic, and this setting has now moved twice for the same
 > reason. It first shipped only in 资源, and the person who asked for the feature
@@ -456,9 +504,9 @@ to be generic. `DEFAULT_EXPERT_MODEL` is now empty on purpose, and:
 | `GET /pm-mode/__health__` | liveness probe |
 | `GET /pm-mode/__api__/state?sessionId=…&windowMs=…` | one board: summary + gantt + metrics + tasks + **domains + experts** + resources + **settings** + notes |
 | `GET /pm-mode/__api__/boards` | every board on disk, newest first |
-| `GET /pm-mode/__api__/models` | the expert-model catalog: providers, models, the active route, and the effort ids that route accepts |
+| `GET /pm-mode/__api__/models` | the expert-model catalog: providers, models, the active route, the effort ids that route accepts, and the tier list for the panel's tier editor |
 | `GET /pm-mode/__api__/memory` | one project's experience memory (`?sessionId=…` resolves that board's project, `?project=<key\|绝对路径>` names one directly; `q` / `kind` / `limit` filter) |
-| `POST /pm-mode/__api__/manage` | panel mutations — **loopback only**; a LAN reader can view but never rewrite. Board actions, the memory writes (`memory-remember`, `memory-forget`, same store methods the tool uses), plus `set-expert-model` (the plugin setting, validated against the live LLM adapter before it is written) |
+| `POST /pm-mode/__api__/manage` | panel mutations — **loopback only**; a LAN reader can view but never rewrite. Board actions, the memory writes (`memory-remember`, `memory-forget`, same store methods the tool uses), `set-expert-model` (the legacy default-route write), and `set-expert-tier` / `delete-expert-tier` (named tiers — each route validated against the live LLM adapter before it is written, capabilities derived from the model's advertised modalities) |
 
 ## Configuration
 
@@ -484,14 +532,15 @@ to be generic. `DEFAULT_EXPERT_MODEL` is now empty on purpose, and:
 
 ```powershell
 node scripts/probe-memory.mjs            # 47 checks: project identity, the write/read/forget paths, pruning, ranking
-node scripts/smoke.mjs                 # 125 checks: store, domains, dispatch material, leases, legacy ids, settings, delegation, metrics, persistence
-node scripts/check-tools.mjs           # 66 checks: compiled schemas against a real ToolRuntime, expert tool and the memory write gate included
-node scripts/check-client.mjs          # 55 checks: the inlined bundle stays in sync with its modules, token-only colours, the model picker, a poll that stays silent, the 经验 tab's delete path
-node scripts/check-terms.mjs           # vocabulary: no project-specific term outside the two documented allowances
+node scripts/smoke.mjs                   # 139 checks: store, domains, dispatch material, leases, legacy ids, settings, tier/needs routing, the memory reminders, metrics, persistence
+node scripts/check-tools.mjs             # 70 checks: compiled schemas against a real ToolRuntime, expert tool (tiers/needs params + description) and the memory write gate included
+node scripts/check-collector.mjs         # 15 checks: the timeline collector — owner filtering, adoption, double-end dedupe, exact attribution, the activity rollup
+node scripts/check-client.mjs            # the inlined bundle stays in sync with its modules, token-only colours, the model picker, a poll that stays silent, the 经验 tab's delete path
+node scripts/check-terms.mjs             # vocabulary: no project-specific term outside the two documented allowances
 cd $HOME\.dsh\profiles
-node E:/dsh/dsh-plugin-pm-mode/scripts/check-settings-routes.mjs  # 39 checks: the panel's settings AND memory routes over a fake llm
-node E:/dsh/dsh-plugin-pm-mode/scripts/validate-preset.mjs   # the preset composition, its depth tiers, its doctrine, that the memory reaches both halves, and the two-half boundary (the host row registers no tool and no prompt section)
-node E:/dsh/dsh-plugin-pm-mode/scripts/sync-preset.mjs       # snapshot vs live preset (`--mirror` publishes a repo-side change)
+node E:/dsh/dsh-plugin-pm-mode/scripts/check-settings-routes.mjs  # the panel's settings AND memory routes over a fake llm, tiers included
+node E:/dsh/dsh-plugin-pm-mode/scripts/validate-preset.mjs        # the preset composition, its depth tiers, its doctrine, and the two-half boundary (the host row registers no tool and no prompt section)
+node E:/dsh/dsh-plugin-pm-mode/scripts/build-preset-patch.mjs --check  # presets/pm.patch.yml is in step with preset/agent.cordis.yml
 ```
 
 `lib/store.js`, `lib/collector.js`, `lib/routes.js`, `lib/tools.js`, `lib/memory.js`
